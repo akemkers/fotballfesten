@@ -14,13 +14,16 @@ def debug_log(message, enabled):
 def sha256(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def send_notification():
+def send_notification(test=False):
     headers = {
-        "Title": "FOTBALLFESTEN",
+        "Title": "FOTBALLFESTEN (TEST)" if test else "FOTBALLFESTEN",
         "Priority": "5",
         "Tags": "rotating_light,ticket"
     }
-    body = f"Siden endret seg {datetime.now()}"
+    if test:
+        body = f"Testvarsel fra deployment {datetime.now()}"
+    else:
+        body = f"Siden endret seg {datetime.now()}"
     requests.post(
         NTFY_URL,
         headers=headers,
@@ -33,6 +36,7 @@ parser.add_argument("-d", "--debug", action="store_true")
 args = parser.parse_args()
 debug = args.debug
 last_html = ""
+test_notification_sent = False
 
 while True:
     try:
@@ -58,6 +62,14 @@ while True:
             print(f"{datetime.now()}: Initial page loaded")
             initial_hash = sha256(html)
             debug_log(f"Initial hash: {initial_hash}", debug)
+
+            if not test_notification_sent:
+                try:
+                    send_notification(test=True)
+                    print(f"{datetime.now()}: TEST notification sent")
+                except Exception as e:
+                    print(f"{datetime.now()}: TEST notification failed - {e}")
+                test_notification_sent = True
         else:
             current_hash = sha256(html)
             previous_hash = sha256(last_html)
