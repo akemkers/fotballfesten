@@ -6,8 +6,8 @@ from datetime import datetime
 
  
 
-URL = https://www.fotballfesten.no/frognerstadion
-NTFY_URL = https://ntfy.sh/fotballfesten-kemkers
+URL = "https://www.fotballfesten.no/frognerstadion"
+NTFY_URL = "https://ntfy.sh/fotballfesten-kemkers"
  
 def debug_log(message, enabled):
     if enabled:
