@@ -81,7 +81,6 @@ while True:
                             print("==============================\n")
                             break
                     else:
-                        # One document is a prefix of the other
                         print(f"\nDifference position: {max_len} (length change only)")
 
                     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -96,12 +95,15 @@ while True:
                     print(f"  {curr_file}")
 
                 print(f"{datetime.now()}: CHANGE DETECTED!")
-             
+
                 try:
                     send_notification()
                     print(f"{datetime.now()}: ntfy notification sent")
                 except Exception as e:
                     print(f"{datetime.now()}: Notification failed - {e}")
+            else:
+                debug_log("Content identical", debug)
+                print(f"{datetime.now()}: No change detected")
 
         last_html = html
     except Exception as e:
