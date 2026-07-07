@@ -76,7 +76,8 @@ while True:
                     max_len = min(len(html), len(last_html))
 
                     for i in range(max_len):
-                        if html[i] != last_htmlstart = max(0, i - 500)
+                        if html[i] != last_html
+                            start = max(0, i - 500)
                             length = min(1000, len(html) - start)
 
                             print("\n========== OLD HTML ==========")
