@@ -18,7 +18,7 @@ def send_notification(test=False):
     headers = {
         "Title": "FOTBALLFESTEN (TEST)" if test else "FOTBALLFESTEN",
         "Priority": "5",
-        "Tags": "rotating_light,ticket"
+        "Tags": "rotating_light"
     }
     if test:
         body = f"Testvarsel fra deployment {datetime.now()}"
@@ -36,7 +36,7 @@ parser.add_argument("-d", "--debug", action="store_true")
 args = parser.parse_args()
 debug = args.debug
 last_html = ""
-test_notification_sent = False
+test_notification_sent = True
 
 while True:
     try:
