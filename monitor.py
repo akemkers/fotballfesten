@@ -5,8 +5,7 @@ import argparse
 from datetime import datetime
 
 URLS = [
-    "https://www.fotballfesten.no/frognerstadion",
-    "https://fotballfesten.no",
+    "https://fanparks.fanparks.com/booking/fotballfesten-frogner-2026",
 ]
 NTFY_URL = "https://ntfy.sh/fotballfesten-kemkers"
 
