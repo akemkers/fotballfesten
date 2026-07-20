@@ -14,7 +14,7 @@ CHROMIUM_PATH = os.environ.get("PLAYWRIGHT_CHROMIUM_PATH")
 
 URL = "https://resale.fotball.no/list/resaleProducts/?lang=no"
 NTFY_URL = "https://ntfy.sh/nff-resale-billetter"
-POLL_INTERVAL = 60      # sekunder mellom hver sjekk
+POLL_INTERVAL = 20      # sekunder mellom hver sjekk
 PAGE_TIMEOUT = 30000    # ms å vente på at lista rendres
 
 # Matcher "0 billetter", "1 billett", "12 billetter" osv.
