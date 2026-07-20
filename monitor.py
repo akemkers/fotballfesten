@@ -2,12 +2,16 @@ import requests
 import hashlib
 import time
 import argparse
+import re
 from datetime import datetime
 
 URLS = [
     "https://resale.fotball.no/list/resaleProducts/?lang=no",
 ]
 NTFY_URL = "https://ntfy.sh/nff-resale-billetter"
+
+# Matcher "0 billetter", "1 billett", "12 billetter" osv.
+TICKET_RE = re.compile(r"(\d+)\s*billett", re.IGNORECASE)
 
 def debug_log(message, enabled):
     if enabled:
@@ -16,13 +20,25 @@ def debug_log(message, enabled):
 def sha256(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def send_notification(url):
+def ticket_count(html):
+    """Summerer alle "<n> billett(er)"-forekomster i HTML-en.
+
+    Returnerer (total, found). found=False betyr at mønsteret ikke fantes
+    i det hele tatt - da er siden sannsynligvis JavaScript-rendret, og vi
+    faller tilbake til hash-basert endringsdeteksjon.
+    """
+    matches = TICKET_RE.findall(html)
+    if not matches:
+        return 0, False
+    return sum(int(m) for m in matches), True
+
+def send_notification(url, message):
     headers = {
         "Title": "NFF RESALE - ULLEVÅL",
         "Priority": "5",
         "Tags": "soccer,rotating_light"
     }
-    body = f"Mulig ledige resale-billetter til Ullevål! Sjekk {url} ({datetime.now()})"
+    body = f"{message} Sjekk {url} ({datetime.now()})"
     requests.post(
         NTFY_URL,
         headers=headers,
@@ -34,7 +50,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-d", "--debug", action="store_true")
 args = parser.parse_args()
 debug = args.debug
-last_html = {url: "" for url in URLS}
+
+# Per-URL tilstand: sist observert billettantall, sist observert hash,
+# og om vi allerede har advart om manglende billett-tekst.
+state = {url: {"count": None, "hash": None, "warned": False} for url in URLS}
 
 while True:
     for url in URLS:
@@ -56,59 +75,53 @@ while True:
                 print(f"{datetime.now()}: Empty response received from {url}, skipping cycle")
                 continue
 
-            if not last_html[url]:
-                print(f"{datetime.now()}: Initial page loaded ({url})")
-                initial_hash = sha256(html)
-                debug_log(f"Initial hash: {initial_hash}", debug)
-            else:
-                current_hash = sha256(html)
-                previous_hash = sha256(last_html[url])
-                debug_log(f"[{url}] Current length : {len(html)}", debug)
-                debug_log(f"[{url}] Previous length: {len(last_html[url])}", debug)
-                debug_log(f"[{url}] Current hash   : {current_hash}", debug)
-                debug_log(f"[{url}] Previous hash  : {previous_hash}", debug)
-                if current_hash != previous_hash:
-                    debug_log(f"Content differs ({url})", debug)
-                    if debug:
-                        prev = last_html[url]
-                        max_len = min(len(html), len(prev))
-                        for i in range(max_len):
-                            if html[i] != prev[i]:
-                                start = max(0, i - 500)
-                                length = min(1000, len(html) - start)
-                                print("\n========== OLD HTML ==========")
-                                print(prev[start:start + length])
-                                print("\n========== NEW HTML ==========")
-                                print(html[start:start + length])
-                                print(f"\nDifference position: {i}")
-                                print("==============================\n")
-                                break
-                        else:
-                            print(f"\nDifference position: {max_len} (length change only)")
+            st = state[url]
+            count, found = ticket_count(html)
 
-                        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                        prev_file = f"previous-{timestamp}.html"
-                        curr_file = f"current-{timestamp}.html"
-                        with open(prev_file, "w", encoding="utf-8") as f:
-                            f.write(prev)
-                        with open(curr_file, "w", encoding="utf-8") as f:
-                            f.write(html)
-                        print("Saved diff files:")
-                        print(f"  {prev_file}")
-                        print(f"  {curr_file}")
-
-                    print(f"{datetime.now()}: CHANGE DETECTED! ({url})")
-
+            if found:
+                # Primærmodus: følg billettantallet direkte.
+                debug_log(f"[{url}] Ledige billetter: {count}", debug)
+                if st["count"] is None:
+                    print(f"{datetime.now()}: Initial load ({url}) - {count} billett(er)")
+                elif count != st["count"]:
+                    prev = st["count"]
+                    print(f"{datetime.now()}: ENDRING ({url}): {prev} -> {count} billett(er)")
+                    if count > prev:
+                        message = f"LEDIGE resale-billetter til Ullevål! Nå {count} billett(er) tilgjengelig (var {prev})."
+                    elif count == 0:
+                        message = "Resale-billetter til Ullevål er utsolgt igjen (0 billetter)."
+                    else:
+                        message = f"Antall resale-billetter til Ullevål endret seg: {prev} -> {count}."
                     try:
-                        send_notification(url)
+                        send_notification(url, message)
                         print(f"{datetime.now()}: ntfy notification sent")
                     except Exception as e:
                         print(f"{datetime.now()}: Notification failed - {e}")
                 else:
-                    debug_log(f"Content identical ({url})", debug)
+                    print(f"{datetime.now()}: Ingen endring ({url}) - {count} billett(er)")
+                st["count"] = count
+            else:
+                # Fallback: billett-teksten fantes ikke i rå-HTML, sannsynligvis
+                # JavaScript-rendret. Advar én gang og fall tilbake til hash.
+                if not st["warned"]:
+                    print(f"{datetime.now()}: ADVARSEL ({url}): fant ingen "
+                          f"'<n> billetter'-tekst i HTML-en. Siden er trolig "
+                          f"JavaScript-rendret; faller tilbake til hash-basert "
+                          f"endringsdeteksjon. Vurder Playwright for pålitelig deteksjon.")
+                    st["warned"] = True
+                current_hash = sha256(html)
+                if st["hash"] is None:
+                    print(f"{datetime.now()}: Initial load ({url}) - hash {current_hash[:12]}")
+                elif current_hash != st["hash"]:
+                    print(f"{datetime.now()}: CHANGE DETECTED (hash) ({url})")
+                    try:
+                        send_notification(url, "Resale-siden for Ullevål endret seg.")
+                        print(f"{datetime.now()}: ntfy notification sent")
+                    except Exception as e:
+                        print(f"{datetime.now()}: Notification failed - {e}")
+                else:
                     print(f"{datetime.now()}: No change detected ({url})")
-
-            last_html[url] = html
+                st["hash"] = current_hash
         except Exception as e:
             print(f"{datetime.now()}: Error ({url}) - {e}")
     time.sleep(10)
