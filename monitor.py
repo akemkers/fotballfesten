@@ -99,10 +99,13 @@ launch_kwargs = {"headless": True}
 if CHROMIUM_PATH:
     launch_kwargs["executable_path"] = CHROMIUM_PATH
 
+print(f"{datetime.now()}: Starter overvåking av {URL} (intervall {interval}s)", flush=True)
+
 with sync_playwright() as pw:
     browser = pw.chromium.launch(**launch_kwargs)
     context = browser.new_context(user_agent="Mozilla/5.0")
     page = context.new_page()
+    print(f"{datetime.now()}: Chromium startet, begynner å sjekke...", flush=True)
 
     while True:
         try:
