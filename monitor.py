@@ -5,9 +5,9 @@ import argparse
 from datetime import datetime
 
 URLS = [
-    "https://fanparks.fanparks.com/booking/fotballfesten-frogner-2026",
+    "https://resale.fotball.no/list/resaleProducts/?lang=no",
 ]
-NTFY_URL = "https://ntfy.sh/fotballfesten-kemkers"
+NTFY_URL = "https://ntfy.sh/nff-resale-billetter"
 
 def debug_log(message, enabled):
     if enabled:
@@ -18,11 +18,11 @@ def sha256(text):
 
 def send_notification(url):
     headers = {
-        "Title": "FOTBALLFESTEN",
+        "Title": "NFF RESALE - ULLEVÅL",
         "Priority": "5",
-        "Tags": "rotating_light"
+        "Tags": "soccer,rotating_light"
     }
-    body = f"Siden endret seg: {url} ({datetime.now()})"
+    body = f"Mulig ledige resale-billetter til Ullevål! Sjekk {url} ({datetime.now()})"
     requests.post(
         NTFY_URL,
         headers=headers,
