@@ -32,12 +32,13 @@ Abonner på varslene ved å legge til topicen `nff-resale-billetter` i ntfy-appe
 
 ## Deploy på Railway
 
-Nixpacks (standard-byggeren som kjører `pip install` automatisk) får som regel
-ikke med seg Chromium og systembibliotekene den krever. Derfor ligger det en
-`Dockerfile` i repoet som bruker Playwrights offisielle image – da er Chromium
-og alle OS-avhengigheter ferdig installert.
+Railway sin auto-bygger (Railpack, som er standard nå etter at Nixpacks ble
+utfaset) får som regel ikke med seg Chromium og systembibliotekene den krever.
+Derfor ligger det en `Dockerfile` i repoet som bruker Playwrights offisielle
+image – da er Chromium og alle OS-avhengigheter ferdig installert.
 
-1. Railway oppdager `Dockerfile` automatisk og bruker den i stedet for Nixpacks.
+1. Railway oppdager `Dockerfile` automatisk og bruker den i stedet for
+   auto-byggeren (Railpack/Nixpacks).
 2. Entrypointet er `python monitor.py` (satt som `CMD` i Dockerfile) – ingen
    ekstra start-kommando trengs.
 3. Tjenesten er en bakgrunns-worker og lytter ikke på noen HTTP-port, så du
