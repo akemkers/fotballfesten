@@ -28,7 +28,7 @@ def debug_log(message, enabled):
 
 def send_notification(message):
     headers = {
-        "Title": "NFF RESALE - ULLEVÅL",
+        "Title": "NFF Resale - Ledige billetter!",
         "Priority": "5",
         "Tags": "soccer,rotating_light",
     }
