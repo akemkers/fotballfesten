@@ -101,38 +101,40 @@ if CHROMIUM_PATH:
 
 print(f"{datetime.now()}: Starter overvåking av {URL} (intervall {interval}s)", flush=True)
 
-with sync_playwright() as pw:
-    browser = pw.chromium.launch(**launch_kwargs)
-    context = browser.new_context(user_agent="Mozilla/5.0")
-    page = context.new_page()
-    print(f"{datetime.now()}: Chromium startet, begynner å sjekke...", flush=True)
+while True:
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(**launch_kwargs)
+            context = browser.new_context(user_agent="Mozilla/5.0")
+            page = context.new_page()
+            try:
+                products = scrape_products(page, debug)
+            finally:
+                browser.close()
 
-    while True:
-        try:
-            products = scrape_products(page, debug)
-            total = total_available(products)
-            breakdown = format_breakdown(products)
+        total = total_available(products)
+        breakdown = format_breakdown(products)
 
-            if last_total is None:
-                print(f"{datetime.now()}: Initial load - {total} ledige billetter ({breakdown})")
-            elif total != last_total:
-                print(f"{datetime.now()}: ENDRING: {last_total} -> {total} billetter ({breakdown})")
-                if total > last_total:
-                    message = f"LEDIGE resale-billetter til Ullevål! Nå {total} billett(er) tilgjengelig: {breakdown}."
-                elif total == 0:
-                    message = "Resale-billetter til Ullevål er utsolgt igjen (0 billetter)."
-                else:
-                    message = f"Antall resale-billetter endret seg til {total}: {breakdown}."
-                try:
-                    send_notification(message)
-                    print(f"{datetime.now()}: ntfy notification sent")
-                except Exception as e:
-                    print(f"{datetime.now()}: Notification failed - {e}")
+        if last_total is None:
+            print(f"{datetime.now()}: Initial load - {total} ledige billetter ({breakdown})")
+        elif total != last_total:
+            print(f"{datetime.now()}: ENDRING: {last_total} -> {total} billetter ({breakdown})")
+            if total > last_total:
+                message = f"LEDIGE resale-billetter til Ullevål! Nå {total} billett(er) tilgjengelig: {breakdown}."
+            elif total == 0:
+                message = "Resale-billetter til Ullevål er utsolgt igjen (0 billetter)."
             else:
-                print(f"{datetime.now()}: Ingen endring - {total} billett(er)")
+                message = f"Antall resale-billetter endret seg til {total}: {breakdown}."
+            try:
+                send_notification(message)
+                print(f"{datetime.now()}: ntfy notification sent")
+            except Exception as e:
+                print(f"{datetime.now()}: Notification failed - {e}")
+        else:
+            print(f"{datetime.now()}: Ingen endring - {total} billett(er)")
 
-            last_total = total
-        except Exception as e:
-            print(f"{datetime.now()}: Error - {e}")
+        last_total = total
+    except Exception as e:
+        print(f"{datetime.now()}: Error - {e}")
 
-        time.sleep(interval)
+    time.sleep(interval)
