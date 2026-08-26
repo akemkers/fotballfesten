@@ -22,13 +22,40 @@ playwright install chromium
 ## Kjøring
 
 ```bash
-python monitor.py                 # sjekker hvert 60. sekund
+python monitor.py                 # sjekker hvert 20. sekund
 python monitor.py -i 30           # sjekker hvert 30. sekund
-python monitor.py -d              # debug-logging
+python monitor.py -d              # [DIAG]-logging for hver sjekk
+python monitor.py --once          # kjør én sjekk og avslutt
+python monitor.py --test-notify   # send testmelding til ntfy og avslutt
 ```
 
 Abonner på varslene ved å legge til topicen `nff-resale-billetter` i ntfy-appen
 (eller åpne https://ntfy.sh/nff-resale-billetter).
+
+## Når overvåkingen ikke kan lese antallet
+
+Scriptet skiller mellom «det er 0 billetter» og «jeg klarte ikke lese antallet».
+Det er en viktig forskjell: tidligere ble alle leseferil tolket som 0, slik at en
+ødelagt selektor så ut som helt normal drift i loggen – rolige `0 billett(er)` i
+det uendelige – mens ekte billetter gikk upåaktet hen.
+
+Antallet leses nå fra flere kilder i tur og orden, fra smalest til bredest:
+
+1. `.resale-availability .resale-list-number`
+2. `.resale-list-number` (i tilfelle wrapperen mangler)
+3. `.resale-availability`
+4. hele produktkortets tekst
+
+Hver kilde prøves mot «N billett(er)», mot et blankt tall (`3`), og mot
+«utsolgt»/«ingen billetter». Treffer ingen av dem, blir antallet `ULESELIG` –
+ikke 0. Da logges råteksten og kortets HTML som `[DIAG]`, og etter
+tre slike sjekker på rad sendes et eget ntfy-varsel («VARSLING NEDE»), som
+gjentas omtrent hver halvtime til antallet er leselig igjen.
+
+Det samme gjelder når lista er tom uten at siden selv sier at det ikke er noe
+til salgs – da har vi mest sannsynlig ikke fått tak i lista.
+
+Stillhet fra varslingen skal aldri kunne bety at overvåkingen er ødelagt.
 
 ## Deploy på Railway
 
@@ -45,7 +72,7 @@ image – da er Chromium og alle OS-avhengigheter ferdig installert.
    trenger ikke sette opp en port eller healthcheck.
 
 Hold Playwright-versjonen i `requirements.txt` og image-taggen i `Dockerfile`
-(`v1.61.0-jammy`) omtrent i synk når du oppgraderer.
+(`v1.62.0-jammy`) omtrent i synk når du oppgraderer.
 
 ## Miljøvariabler
 
