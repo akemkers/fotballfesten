@@ -71,6 +71,29 @@ def scrape_products(page, debug):
     return results
 
 
+def log_page_diagnostics(page):
+    """Rapporterer hva nettleseren faktisk ser når scraping feiler, slik at
+    vi kan skille mellom venterom/kø, samtykke-vegg og strukturendring."""
+    try:
+        title = page.title()
+    except Exception:
+        title = "(ukjent)"
+    try:
+        info = page.evaluate(
+            """() => ({
+                products: document.querySelectorAll('#list_all_tickets .product').length,
+                loaderVisible: !!document.querySelector('#list_all_tickets #loading_mark'),
+                noTickets: !!document.querySelector('#notification_no_ticket_on_sales:not(.hidden)'),
+                listLen: (document.querySelector('#list_all_tickets')?.innerHTML || '').length,
+                queue: /waiting room|begrenset adgang|kjøpsvindu|venterom|queue/i
+                    .test(document.body ? document.body.innerText : '')
+            })"""
+        )
+    except Exception as e:
+        info = f"(kunne ikke inspisere: {e})"
+    print(f"{datetime.now()}: [DIAG] tittel='{title}' {info}", flush=True)
+
+
 def total_available(products):
     return sum(count for _, _, count in products)
 
@@ -103,38 +126,47 @@ print(f"{datetime.now()}: Starter overvåking av {URL} (intervall {interval}s)",
 
 while True:
     try:
+        # Start og stopp nettleseren per sjekk for å holde minnebruken nede.
         with sync_playwright() as pw:
             browser = pw.chromium.launch(**launch_kwargs)
             context = browser.new_context(user_agent="Mozilla/5.0")
             page = context.new_page()
             try:
                 products = scrape_products(page, debug)
+            except Exception:
+                # Logg hva nettleseren faktisk ser FØR den lukkes.
+                log_page_diagnostics(page)
+                raise
             finally:
                 browser.close()
 
         total = total_available(products)
         breakdown = format_breakdown(products)
 
-        if last_total is None:
-            print(f"{datetime.now()}: Initial load - {total} ledige billetter ({breakdown})")
-        elif total != last_total:
-            print(f"{datetime.now()}: ENDRING: {last_total} -> {total} billetter ({breakdown})")
-            if total > last_total:
-                message = f"LEDIGE resale-billetter til Ullevål! Nå {total} billett(er) tilgjengelig: {breakdown}."
-            elif total == 0:
-                message = "Resale-billetter til Ullevål er utsolgt igjen (0 billetter)."
-            else:
-                message = f"Antall resale-billetter endret seg til {total}: {breakdown}."
+        # Behandle "ny oppstart" (last_total is None) som at det var 0 fra før,
+        # slik at billetter som ALLEREDE er tilgjengelige når tjenesten
+        # (re)starter også utløser et varsel.
+        prev = 0 if last_total is None else last_total
+        became_available = total > 0 and prev == 0
+        increased = prev > 0 and total > prev
+
+        print(f"{datetime.now()}: Sjekk - {len(products)} produkt(er), {total} ledige billetter ({breakdown})", flush=True)
+
+        message = None
+        if became_available:
+            message = f"LEDIGE resale-billetter til Ullevål! {total} billett(er) tilgjengelig: {breakdown}."
+        elif increased:
+            message = f"Flere resale-billetter til Ullevål: {prev} -> {total}: {breakdown}."
+
+        if message:
             try:
                 send_notification(message)
-                print(f"{datetime.now()}: ntfy notification sent")
+                print(f"{datetime.now()}: ntfy notification sent", flush=True)
             except Exception as e:
-                print(f"{datetime.now()}: Notification failed - {e}")
-        else:
-            print(f"{datetime.now()}: Ingen endring - {total} billett(er)")
+                print(f"{datetime.now()}: Notification failed - {e}", flush=True)
 
         last_total = total
     except Exception as e:
-        print(f"{datetime.now()}: Error - {e}")
+        print(f"{datetime.now()}: Error - {type(e).__name__}: {e}", flush=True)
 
     time.sleep(interval)
