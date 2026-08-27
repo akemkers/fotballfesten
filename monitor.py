@@ -179,17 +179,96 @@ def resolve_count(product):
     return None, "ingen treff"
 
 
-def product_key(product):
-    """Nøkkel for å spore ett arrangement over tid.
+# Endepunktet som backer resale-siden. Settes via miljøvariabel slik at
+# tjenesten kan bytte til API uten kodeendring; er den tom, brukes
+# nettleseren som før.
+API_URL = os.environ.get("RESALE_API_URL", "").strip()
+API_TIMEOUT = 15         # sekunder
+API_POLL_INTERVAL = 10   # sekunder mellom sjekker når vi går via API
 
-    Returnerer None når navnet mangler. Da kan vi ikke skille kortene fra
-    hverandre, og alle ville kollapset til samme nøkkel - det ville skjult
-    ekte økninger helt lydløst. Uten navn regnes kortet som uleselig.
+
+class ApiShapeError(Exception):
+    """Svaret fra API-et hadde ikke formen vi forventer."""
+
+
+def item(name, venue, count, detail, raw=None):
+    """Normalisert produkt. Samme form uansett om det kom fra API eller DOM,
+    slik at varslingslogikken ikke trenger å vite hvilken vei det tok."""
+    return {
+        "name": (name or "").strip(),
+        "venue": (venue or "").strip(),
+        "count": count,
+        "detail": detail,
+        "raw": raw,
+    }
+
+
+def api_count(product):
+    """Henter antall ledige billetter fra ett API-produkt.
+
+    availableQuantity er hovedsignalet; ticketCount er null i praksis. Er
+    BEGGE null, er antallet ukjent - ikke null. Den forskjellen er hele
+    grunnen til at varsler tidligere forsvant i stillhet.
     """
-    name = (product.get("name") or "").strip()
-    if not name:
-        return None
-    return f"{name}|{(product.get('venue') or '').strip()}"
+    for field in ("availableQuantity", "ticketCount"):
+        value = product.get(field)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            if value < 0:
+                continue
+            return value, field
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip()), f"{field} (streng)"
+    return None, "availableQuantity og ticketCount mangler"
+
+
+def parse_api_payload(data):
+    """Gjør API-svaret om til normaliserte produkter + sidetilstand.
+
+    Kaster ApiShapeError hvis strukturen ikke er som forventet, slik at vi
+    faller tilbake på nettleseren i stedet for å rapportere null billetter.
+    """
+    if not isinstance(data, dict):
+        raise ApiShapeError(f"forventet objekt, fikk {type(data).__name__}")
+    if "topicWithProductsList" not in data:
+        raise ApiShapeError("mangler topicWithProductsList")
+    groups = data.get("topicWithProductsList") or []
+    if not isinstance(groups, list):
+        raise ApiShapeError("topicWithProductsList er ikke en liste")
+
+    items = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for product in (group.get("products") or []):
+            if not isinstance(product, dict):
+                continue
+            count, detail = api_count(product)
+            items.append(item(product.get("name"), product.get("venue"),
+                              count, detail, raw=product))
+
+    # Alle produkter uten lesbart antall betyr at feltene har byttet navn.
+    if items and all(i["count"] is None for i in items):
+        raise ApiShapeError(f"ingen av {len(items)} produkter hadde lesbart antall")
+
+    resale_items = data.get("resaleItems") or []
+    state = {
+        "kilde": "api",
+        "produkter": len(items),
+        "resaleItems": len(resale_items) if isinstance(resale_items, list) else "?",
+        "seatRelease": bool(data.get("seatRelease")),
+        "noTicketBanner": not items,
+        "productMarkup": False,
+    }
+    return items, state
+
+
+def fetch_via_api(session):
+    resp = session.get(API_URL, timeout=API_TIMEOUT,
+                       headers={"Accept": "application/json"})
+    resp.raise_for_status()
+    return parse_api_payload(resp.json())
 
 
 def scrape(page):
@@ -294,23 +373,37 @@ def log_page_diagnostics(page):
     diag(f"tittel='{title}' {info}")
 
 
-def format_breakdown(resolved):
-    if not resolved:
+
+def fetch_via_dom(page):
+    """Fallback: rendrer siden i nettleseren og leser antallet fra DOM-en.
+    Returnerer samme normaliserte form som API-veien."""
+    products, page_state = scrape(page)
+    items = []
+    for product in products:
+        count, source = resolve_count(product)
+        items.append(item(product.get("name"), product.get("venue"),
+                          count, source, raw=product))
+    page_state["kilde"] = "dom"
+    return items, page_state
+
+
+def format_breakdown(items):
+    if not items:
         return "ingen arrangementer oppført"
     parts = []
-    for product, count, _source in resolved:
-        navn = (product["name"] or "").strip() or "(uten navn)"
-        loc = f" @ {product['venue']}" if product["venue"] else ""
-        antall = "ULESELIG" if count is None else f"{count} billett(er)"
+    for entry in items:
+        navn = entry["name"] or "(uten navn)"
+        loc = f" @ {entry['venue']}" if entry["venue"] else ""
+        antall = "ULESELIG" if entry["count"] is None else f"{entry['count']} billett(er)"
         parts.append(f"{navn}{loc}: {antall}")
     return "; ".join(parts)
 
 
 def format_increases(increases):
     parts = []
-    for product, before, now in increases:
-        navn = (product["name"] or "").strip() or "(uten navn)"
-        loc = f" @ {product['venue']}" if product["venue"] else ""
+    for key, before, now in increases:
+        navn, _, sted = key.partition("|")
+        loc = f" @ {sted}" if sted else ""
         forrige = "ukjent" if before is None else str(before)
         parts.append(f"{navn}{loc}: {forrige} -> {now} billett(er)")
     return "; ".join(parts)
@@ -319,7 +412,7 @@ def format_increases(increases):
 def new_state():
     return {
         # nøkkel -> sist sikkert observerte antall, eller None = ukjent
-        # (kortet var uleselig, så vi vet ikke hva som skjedde imens)
+        # (produktet var uleselig, så vi vet ikke hva som skjedde imens)
         "baselines": {},
         # nøkkel -> (antall, tidspunkt) for sist SENDTE varsel
         "alerted": {},
@@ -331,11 +424,24 @@ def new_state():
     }
 
 
+def product_key(entry):
+    """Nøkkel for å spore ett arrangement over tid.
+
+    Returnerer None når navnet mangler. Da kan vi ikke skille produktene fra
+    hverandre, og alle ville kollapset til samme nøkkel - det ville skjult
+    ekte økninger helt lydløst. Uten navn regnes produktet som uleselig.
+    """
+    name = (entry.get("name") or "").strip()
+    if not name:
+        return None
+    return f"{name}|{(entry.get('venue') or '').strip()}"
+
+
 def register_check(state, blind, reason):
     """Fører blind-regnskapet og varsler når overvåkingen har vært blind
     lenge nok. Kalles for HVER sjekk - også de som kastet unntak, ellers
-    ville en strukturendring (som gir timeout, ikke uleselig tall) gå helt
-    stille forbi.
+    ville en strukturendring (som gir unntak, ikke et uleselig tall) gå
+    helt stille forbi.
     """
     state["blind_window"].append(bool(blind))
     state["checks_since_blind_alert"] += 1
@@ -351,7 +457,7 @@ def register_check(state, blind, reason):
     streak_blind = state["blind_streak"] >= BLIND_ALERT_AFTER
 
     # Friskmelding krever en solid serie gode sjekker. Uten det ville en
-    # side som blaffer sendt NEDE og friskmelding om hverandre i det
+    # kilde som blaffer sendt NEDE og friskmelding om hverandre i det
     # uendelige, og push-spam ender med at topicen dempes - da er også det
     # ekte billettvarselet borte.
     if not blind and not window_blind and state["good_streak"] >= RECOVERY_AFTER_GOOD:
@@ -396,35 +502,35 @@ def register_check(state, blind, reason):
         log(f"Blind-varsel feilet - {type(e).__name__}: {e} (prøver igjen neste sjekk)")
 
 
-def collect_counts(resolved):
-    """Slår sammen produktkort til {nøkkel: antall}, og rapporterer hvilke
-    kort som ikke lot seg lese.
+def collect_counts(items):
+    """Slår sammen produkter til {nøkkel: antall}, og rapporterer hvilke
+    som ikke lot seg lese.
 
-    Kort med samme nøkkel summeres. Ville vi latt det siste kortet
-    overskrive det første, kunne en økning på det første blitt usynlig -
-    og i motsatt rekkefølge ville baselinen blitt nullstilt hver sjekk og
-    gitt varsel i det uendelige.
+    Produkter med samme nøkkel summeres. Ville vi latt det siste overskrive
+    det første, kunne en økning på det første blitt usynlig - og i motsatt
+    rekkefølge ville baselinen blitt nullstilt hver sjekk og gitt varsel i
+    det uendelige.
     """
     counts = {}
     unreadable_keys = set()
-    unreadable_cards = []
-    for product, count, _source in resolved:
-        key = product_key(product)
-        if key is None or count is None:
-            unreadable_cards.append(product)
+    unreadable = []
+    for entry in items:
+        key = product_key(entry)
+        if key is None or entry["count"] is None:
+            unreadable.append(entry)
             if key is not None:
                 unreadable_keys.add(key)
             continue
-        counts[key] = counts.get(key, 0) + count
-    return counts, unreadable_keys, unreadable_cards
+        counts[key] = counts.get(key, 0) + entry["count"]
+    return counts, unreadable_keys, unreadable
 
 
 def find_increases(state, counts, unreadable_keys, now_ts):
     """Finner arrangementer som har fått flere billetter siden sist.
 
-    Er baselinen ukjent (kortet var uleselig forrige gang), varsler vi på
-    ethvert positivt antall. Vi vet ikke om antallet falt til null imens,
-    og et unødvendig varsel er langt billigere enn et tapt. Gjentakelser av
+    Er baselinen ukjent (produktet var uleselig forrige gang), varsler vi på
+    ethvert positivt antall. Vi vet ikke om antallet falt til null imens, og
+    et unødvendig varsel er langt billigere enn et tapt. Gjentakelser av
     nøyaktig samme antall dempes innenfor REPEAT_ALERT_COOLDOWN.
     """
     increases = []
@@ -445,53 +551,44 @@ def find_increases(state, counts, unreadable_keys, now_ts):
     return increases
 
 
-def run_check(page, debug, state, now_ts=None):
-    """Kjører én sjekk. Returnerer True hvis sjekken var blind."""
+def run_check(items, source_state, debug, state, now_ts=None):
+    """Vurderer ett sett produkter og varsler. Returnerer True hvis blind."""
     now_ts = time.monotonic() if now_ts is None else now_ts
-    products, page_state = scrape(page)
-
-    resolved = [(p, *resolve_count(p)) for p in products]
-    counts, unreadable_keys, unreadable_cards = collect_counts(resolved)
+    counts, unreadable_keys, unreadable = collect_counts(items)
     total = sum(counts.values())
 
-    # Tom liste er bare troverdig når siden selv sier at det ikke er noe til
-    # salgs OG lista faktisk ikke inneholder produkt-markup. Finner vi
-    # markup uten å få ut kort, har strukturen endret seg.
-    no_products_anomaly = not products and (
-        not page_state.get("noTicketBanner") or page_state.get("productMarkup")
+    # Tom liste er bare troverdig når kilden selv sier at det ikke er noe
+    # til salgs. Finner vi produktmarkup uten å få ut produkter, har
+    # strukturen endret seg.
+    no_products_anomaly = not items and (
+        not source_state.get("noTicketBanner") or source_state.get("productMarkup")
     )
-    in_queue = bool(page_state.get("queue"))
-    blind = bool(unreadable_cards) or no_products_anomaly or in_queue
+    in_queue = bool(source_state.get("queue"))
+    blind = bool(unreadable) or no_products_anomaly or in_queue
 
     if in_queue:
         reason = "siden viser venterom/kø"
     elif no_products_anomaly:
-        reason = (f"fant ingen arrangementer (listLen={page_state.get('listLen')}, "
-                  f"produktmarkup={page_state.get('productMarkup')})")
-    elif unreadable_cards:
-        navnloese = sum(1 for p in unreadable_cards if not (p.get("name") or "").strip())
-        reason = f"klarer ikke lese {len(unreadable_cards)} kort"
+        reason = f"fant ingen arrangementer ({source_state})"
+    elif unreadable:
+        navnloese = sum(1 for e in unreadable if not e["name"])
+        reason = f"klarer ikke lese {len(unreadable)} produkt(er)"
         if navnloese:
-            reason += f" ({navnloese} mangler navn - navneselektoren kan være brutt)"
+            reason += f" ({navnloese} mangler navn - kilden kan ha endret struktur)"
     else:
         reason = ""
 
-    status = f"Sjekk - {len(products)} produkt(er), {total} ledige billetter"
-    if unreadable_cards:
-        status += f", {len(unreadable_cards)} ULESELIG"
-    log(f"{status} ({format_breakdown(resolved)})")
+    kilde = source_state.get("kilde", "?")
+    status = f"Sjekk [{kilde}] - {len(items)} produkt(er), {total} ledige billetter"
+    if unreadable:
+        status += f", {len(unreadable)} ULESELIG"
+    log(f"{status} ({format_breakdown(items)})")
 
     if blind or debug:
-        diag(f"side={page_state}")
-        for product, count, source in resolved:
-            if count is None or not (product["name"] or "").strip() or debug:
-                diag(
-                    f"'{product['name']}' kilde={source} "
-                    f"number={product['number']!r} loose={product['looseNumber']!r} "
-                    f"avail={product['availability']!r} tekst={product['cardText']!r}"
-                )
-                if count is None:
-                    diag(f"'{product['name']}' html={product['cardHtml']!r}")
+        diag(f"kilde={source_state}")
+        for entry in items:
+            if entry["count"] is None or not entry["name"] or debug:
+                diag(f"'{entry['name']}' felt={entry['detail']} raa={entry['raw']!r}")
 
     # --- Billettvarsel FØRST ---
     # Diagnosevarsler må aldri stå foran i køen: er ntfy treg, ville de
@@ -500,15 +597,9 @@ def run_check(page, debug, state, now_ts=None):
 
     delivered = True
     if increases:
-        detaljer = [
-            (next(p for p, _c, _s in resolved if product_key(p) == key), before, now)
-            for key, before, now in increases
-        ]
         gained = sum(now - (before or 0) for _k, before, now in increases)
-        message = (
-            f"LEDIGE resale-billetter! {gained} ny(e) billett(er): "
-            f"{format_increases(detaljer)}."
-        )
+        message = (f"LEDIGE resale-billetter! {gained} ny(e) billett(er): "
+                   f"{format_increases(increases)}.")
         try:
             notify("NFF Resale - Ledige billetter!", message)
             log("ntfy: billettvarsel sendt")
@@ -539,34 +630,46 @@ def _watchdog(_signum, _frame):
     raise CheckTimeout(f"sjekken oversteg {CHECK_WATCHDOG}s")
 
 
-def one_check(launch_kwargs, debug, state):
-    """Kjører én sjekk i en fersk nettleser. Returnerer (ok, blind)."""
+def gather(session, launch_kwargs):
+    """Henter produkter. API først når det er konfigurert, ellers - og ved
+    feil - via nettleseren. Et internt API kan endres uten varsel, så
+    fallbacken er det som hindrer at overvåkingen stopper helt."""
+    if API_URL and session is not None:
+        try:
+            return fetch_via_api(session)
+        except Exception as e:
+            log(f"API-kall feilet - {type(e).__name__}: {e} - faller tilbake på nettleser")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(**launch_kwargs)
+        try:
+            context = browser.new_context(user_agent="Mozilla/5.0")
+            page = context.new_page()
+            try:
+                return fetch_via_dom(page)
+            except Exception:
+                # Logg hva nettleseren faktisk ser FØR den lukkes.
+                log_page_diagnostics(page)
+                raise
+        finally:
+            # En feilende close() skal ikke erstatte den egentlige feilen.
+            try:
+                browser.close()
+            except Exception as e:
+                log(f"browser.close() feilet - {type(e).__name__}: {e}")
+
+
+def one_check(session, launch_kwargs, debug, state):
+    """Kjører én sjekk. Returnerer (ok, blind)."""
     if HAS_ALARM:
         signal.signal(signal.SIGALRM, _watchdog)
         signal.alarm(CHECK_WATCHDOG)
     try:
-        # Start og stopp nettleseren per sjekk for å holde minnebruken nede.
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(**launch_kwargs)
-            try:
-                context = browser.new_context(user_agent="Mozilla/5.0")
-                page = context.new_page()
-                try:
-                    return True, run_check(page, debug, state)
-                except Exception:
-                    # Logg hva nettleseren faktisk ser FØR den lukkes.
-                    log_page_diagnostics(page)
-                    raise
-            finally:
-                # En feilende close() skal ikke erstatte den egentlige
-                # feilen i loggen.
-                try:
-                    browser.close()
-                except Exception as e:
-                    log(f"browser.close() feilet - {type(e).__name__}: {e}")
+        items, source_state = gather(session, launch_kwargs)
+        return True, run_check(items, source_state, debug, state)
     except Exception as e:
         log(f"Error - {type(e).__name__}: {e}")
-        # En strukturendring gir timeout her, ikke et uleselig tall. Uten
+        # En strukturendring gir unntak her, ikke et uleselig tall. Uten
         # dette ville den vanligste bruddformen gått helt stille.
         register_check(state, True, f"sjekken feilet ({type(e).__name__})")
         return False, True
@@ -579,8 +682,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--debug", action="store_true",
                         help="logg [DIAG] for hver sjekk, ikke bare ved feil")
-    parser.add_argument("-i", "--interval", type=int, default=POLL_INTERVAL,
-                        help="sekunder mellom hver sjekk")
+    parser.add_argument("-i", "--interval", type=int, default=None,
+                        help=f"sekunder mellom hver sjekk "
+                             f"(standard {API_POLL_INTERVAL} via API, {POLL_INTERVAL} via nettleser)")
     parser.add_argument("--once", action="store_true",
                         help="kjør én sjekk og avslutt (exit 1 ved feil eller blind sjekk)")
     parser.add_argument("--test-notify", action="store_true",
@@ -601,18 +705,28 @@ def main():
     if CHROMIUM_PATH:
         launch_kwargs["executable_path"] = CHROMIUM_PATH
 
+    session = requests.Session() if API_URL else None
+    interval = args.interval
+    if interval is None:
+        interval = API_POLL_INTERVAL if API_URL else POLL_INTERVAL
+
     state = new_state()
-    log(f"Starter overvåking av {URL} (intervall {args.interval}s)")
+    if API_URL:
+        log(f"Starter overvåking via API {API_URL} (intervall {interval}s, "
+            f"nettleser som fallback)")
+    else:
+        log(f"Starter overvåking av {URL} via nettleser (intervall {interval}s). "
+            f"Sett RESALE_API_URL for å bruke API-et i stedet.")
 
     while True:
         started = time.monotonic()
-        ok, blind = one_check(launch_kwargs, args.debug, state)
+        ok, blind = one_check(session, launch_kwargs, args.debug, state)
 
         if args.once:
             return 0 if (ok and not blind) else 1
 
-        # Trekk fra tiden sjekken tok, ellers blir perioden 25-30s i praksis.
-        time.sleep(max(0, args.interval - (time.monotonic() - started)))
+        # Trekk fra tiden sjekken tok, ellers blir perioden lengre enn valgt.
+        time.sleep(max(0, interval - (time.monotonic() - started)))
 
 
 if __name__ == "__main__":

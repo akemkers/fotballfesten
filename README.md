@@ -5,12 +5,24 @@ når det dukker opp ledige resale-billetter til Ullevål.
 
 Overvåket side: `https://resale.fotball.no/list/resaleProducts/?lang=no`
 
-## Hvorfor Playwright?
+## To måter å hente data på
 
-Resale-siden er JavaScript-rendret: rå-HTML inneholder bare en «Laster opp»-
-spinner og maler – selve billettantallet settes inn av JavaScript i nettleseren.
-Derfor lastes siden i en ekte (headless) Chromium via Playwright, og antallet
-leses fra det ferdig-rendrede innholdet.
+**API (foretrukket).** Siden backes av et JSON-endepunkt. Settes miljøvariabelen
+`RESALE_API_URL`, hentes antallet derfra – strukturert, uten nettleser, på
+brøkdelen av tiden. Da forsvinner også hele klassen av feil som følger av å lese
+tall ut av HTML.
+
+Antallet leses fra `availableQuantity` på hvert produkt under
+`topicWithProductsList[].products[]`. Merk at `ticketCount` er `null` i praksis;
+den brukes bare som reserve. Er **begge** null, er antallet ukjent – ikke null.
+
+**Nettleser (fallback).** Uten `RESALE_API_URL`, og hver gang API-kallet feiler
+eller svarer med uventet struktur, rendres siden i headless Chromium via
+Playwright og antallet leses fra DOM-en. Siden er JavaScript-rendret: rå-HTML
+inneholder bare en «Laster opp»-spinner og maler.
+
+Fallbacken er poenget: et udokumentert internt API kan endres uten varsel, og da
+skal overvåkingen falle tilbake framfor å stoppe.
 
 ## Oppsett
 
@@ -22,7 +34,7 @@ playwright install chromium
 ## Kjøring
 
 ```bash
-python monitor.py                 # sjekker hvert 20. sekund
+python monitor.py                 # hvert 10. sek via API, hvert 20. via nettleser
 python monitor.py -i 30           # sjekker hvert 30. sekund
 python monitor.py -d              # [DIAG]-logging for hver sjekk
 python monitor.py --once          # kjør én sjekk og avslutt
@@ -147,6 +159,9 @@ Hold Playwright-versjonen i `requirements.txt` og image-taggen i `Dockerfile`
 
 ## Miljøvariabler
 
+- `RESALE_API_URL` – JSON-endepunktet som backer resale-siden. Er den satt,
+  brukes API-et, og nettleseren beholdes kun som fallback. Er den tom, går alt
+  via nettleseren som før.
 - `PLAYWRIGHT_CHROMIUM_PATH` – valgfri sti til Chromium-binæren dersom
   Playwright ikke finner nettleseren selv. Trengs ikke med Docker-imaget
   over, eller etter `playwright install chromium` lokalt.

@@ -1,0 +1,35 @@
+{
+    "resaleItems": [],
+    "topics": [],
+    "topicWithProductsList": [
+        {
+            "key": null,
+            "name": "",
+            "topicId": null,
+            "products": [
+                {
+                    "productId": 10229739619905,
+                    "name": "Nations League - A-herrer",
+                    "complement": null,
+                    "venue": "Ullevaal Stadion",
+                    "ticketCount": null,
+                    "productLogoUrl": "https://s3.eu-central-1.amazonaws.com/content-nff-prod-secutix-isrsy7a1/images/catalog/product/med/09329c54-5213-4ce0-ae83-c8fede5ef2b9.png",
+                    "availablePerfDate": [[2026, 9, 24], [2026, 9, 27], [2026, 11, 14]],
+                    "productPagePath": null,
+                    "firstPerformanceDate": [2026, 9, 24, 20, 45, 0],
+                    "lastPerformanceDate": [2026, 11, 14, 18, 0, 0],
+                    "availableQuantity": 0,
+                    "minPrice": 0,
+                    "topicIds": [],
+                    "subTopicIds": [],
+                    "productFamilySubType": "SPORTING_EVENT",
+                    "validFrom": [],
+                    "validTo": [],
+                    "validityRule": null
+                }
+            ]
+        }
+    ],
+    "hasTicketWithReducedTariff": false,
+    "seatRelease": false
+}
