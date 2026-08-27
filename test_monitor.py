@@ -1,8 +1,8 @@
 """Tester for monitor.py.
 
-Kjøres uten Playwright og requests installert - begge stubbes ut, og
-`scrape`/`notify` monkeypatches, slik at hele varslingslogikken kan drives
-gjennom oppdiktede sider.
+Kjøres uten requests installert - modulen stubbes ut og `notify`
+monkeypatches, slik at hele varslingslogikken kan drives gjennom
+oppdiktede API-svar.
 
     python3 test_monitor.py
 
@@ -19,18 +19,13 @@ import sys
 import types
 
 sys.modules.setdefault("requests", types.ModuleType("requests"))
-_pw = types.ModuleType("playwright.sync_api")
-_pw.sync_playwright = None
-sys.modules.setdefault("playwright", types.ModuleType("playwright"))
-sys.modules["playwright.sync_api"] = _pw
 
 _spec = importlib.util.spec_from_file_location(
     "monitor", os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.py"))
 monitor = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(monitor)
 
-NORMAL = {"kilde": "api", "noTicketBanner": False, "productMarkup": False, "queue": False}
-TOM = {"kilde": "api", "noTicketBanner": True, "productMarkup": False, "queue": False}
+META = {"produkter": 1, "resaleItems": 0, "seatRelease": False}
 
 _results = []
 
@@ -38,16 +33,8 @@ FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "testdata", "resale_empty.json")
 
 
-def card(name="Kamp", venue="Ullevaal", **kw):
-    """Et DOM-produktkort slik scrape() leverer det (fallback-veien)."""
-    base = {"name": name, "venue": venue, "number": None, "looseNumber": None,
-            "availability": None, "cardText": "", "cardHtml": "<div/>"}
-    base.update(kw)
-    return base
-
-
 def it(name="Kamp", venue="Ullevaal", count=0, detail="test"):
-    """Et normalisert produkt slik både API- og DOM-veien leverer det."""
+    """Et normalisert produkt slik parse_api_payload leverer det."""
     return monitor.item(name, venue, count, detail)
 
 
@@ -100,14 +87,14 @@ def check(label, ok, detail=""):
 def test_api():
     print("\nAPI-tolkning (mot ekte svar fra resale-siden)")
     with open(FIXTURE, encoding="utf-8") as fh:
-        items, state = monitor.parse_api_payload(json.load(fh))
+        items, meta = monitor.parse_api_payload(json.load(fh))
     check("ekte payload gir 1 produkt", len(items) == 1, len(items))
     check("navn leses", items[0]["name"] == "Nations League - A-herrer", items[0]["name"])
     check("sted leses", items[0]["venue"] == "Ullevaal Stadion", items[0]["venue"])
     # ticketCount er null i ekte svar - availableQuantity er signalet.
     check("availableQuantity=0 gir 0, ikke ULESELIG", items[0]["count"] == 0, items[0])
     check("kilden navngis", items[0]["detail"] == "availableQuantity", items[0]["detail"])
-    check("resaleItems telles", state["resaleItems"] == 0, state)
+    check("resaleItems telles", meta["resaleItems"] == 0, meta)
 
     items, _ = monitor.parse_api_payload(api_payload(api_product(availableQuantity=3)))
     check("availableQuantity=3 gir 3", items[0]["count"] == 3, items[0])
@@ -140,8 +127,8 @@ def test_api():
             check(f"{label} gir ApiShapeError", True)
 
     # Tomt produktsett er legitimt (ingen arrangementer til salgs).
-    items, state = monitor.parse_api_payload({"topicWithProductsList": [], "resaleItems": []})
-    check("tom produktliste er lovlig", items == [] and state["noTicketBanner"], state)
+    items, meta = monitor.parse_api_payload({"topicWithProductsList": [], "resaleItems": []})
+    check("tom produktliste er lovlig", items == [] and meta["produkter"] == 0, meta)
 
     check("negativt antall regnes som ukjent",
           monitor.api_count({"availableQuantity": -1, "ticketCount": None})[0] is None)
@@ -149,99 +136,66 @@ def test_api():
           monitor.api_count({"availableQuantity": True, "ticketCount": None})[0] is None)
 
 
-def test_parsing():
-    print("\nTolkning av billettantall")
-    cases = [
-        ("0 billetter", 0), ("3 billetter", 3), ("1 billett", 1),
-        ("3 av 10 billetter", 3), ("0 av 5 billetter", 0),
-        ("Kun 2 igjen av 10 billetter", 2),
-        ("1 234 billetter", 1234), ("1.234 billetter", 1234),
-        ("Utsolgt", 0), ("Ingen billetter", 0),
-        # Tallet er ikke et antall ledige - skal gi ULESELIG, ikke 4.
-        ("Maks 4 billetter per kjop", None),
-        ("Maksimalt 6 billetter", None),
-        ("Se tilgjengelighet", None), ("", None),
-        # Tall fra forrige setning skal ikke bli "N av M".
-        ("Sete 9 - resten av 40 billetter", None),
-        ("Rad 5.\nDu kan kjope av 12 billetter", None),
-    ]
-    for text, expected in cases:
-        got, source = monitor.resolve_count(card(availability=text, cardText=text))
-        check(f"{text!r} -> {expected!r}", got == expected, f"fikk {got!r} via {source}")
-
-    # Flertydighet skal gi opp, ikke gjette.
-    got, _ = monitor.resolve_count(card(cardText="3 billetter i felt A, 8 billetter i felt B"))
-    check("flere ulike tall -> ULESELIG", got is None, f"fikk {got!r}")
-
-    # "Utsolgt" i en smal kilde skal ikke skygge for et ekte antall.
-    got, _ = monitor.resolve_count(card(availability="Utsolgt", cardText="2 billetter ledig"))
-    check("'Utsolgt' maskerer ikke ekte antall", got == 2, f"fikk {got!r}")
-
-    # Wrapperen kan mangle - da ligger tallet i .resale-list-number alene.
-    got, _ = monitor.resolve_count(card(looseNumber="3"))
-    check("wrapper mangler -> leser blankt tall", got == 3, f"fikk {got!r}")
-
-
 def test_varsling():
     print("\nBillettvarsling")
-    _, s = drive([([it(count=0)], NORMAL)] * 10)
+    _, s = drive([([it(count=0)], META)] * 10)
     check("stabil 0 gir ingen varsler", len(tickets(s)) == 0, s)
 
-    _, s = drive([([it(count=0)], NORMAL),
-                  ([it(count=3)], NORMAL)])
+    _, s = drive([([it(count=0)], META),
+                  ([it(count=3)], META)])
     check("0 -> 3 gir ett varsel", len(tickets(s)) == 1, s)
 
-    _, s = drive([([it(count=2)], NORMAL)])
+    _, s = drive([([it(count=2)], META)])
     check("billetter ved oppstart gir varsel", len(tickets(s)) == 1, s)
 
-    _, s = drive([([it(count=2)], NORMAL),
-                  ([it(count=5)], NORMAL)])
+    _, s = drive([([it(count=2)], META),
+                  ([it(count=5)], META)])
     check("2 -> 5 gir nytt varsel", len(tickets(s)) == 2, s)
 
-    _, s = drive([([it(count=5)], NORMAL),
-                  ([it(count=2)], NORMAL)])
+    _, s = drive([([it(count=5)], META),
+                  ([it(count=2)], META)])
     check("nedgang gir ikke nytt varsel", len(tickets(s)) == 1, s)
 
 
 def test_per_arrangement():
     print("\nPer-arrangement-sporing")
     # En ren sum ville skjult at B stiger mens A synker.
-    _, s = drive([([it("A", count=3), it("B", count=0)], NORMAL),
-                  ([it("A", count=1), it("B", count=2)], NORMAL)])
+    _, s = drive([([it("A", count=3), it("B", count=0)], META),
+                  ([it("A", count=1), it("B", count=2)], META)])
     check("oekning maskeres ikke av annet arrangement som synker",
           len(tickets(s)) == 2 and "B" in tickets(s)[1], s)
 
     # Duplikate noekler skal summeres, ikke overskrive hverandre.
-    _, s = drive([([it("A", count=0), it("A", count=0)], NORMAL),
-                  ([it("A", count=0), it("A", count=3)], NORMAL),
-                  ([it("A", count=2), it("A", count=3)], NORMAL)])
+    _, s = drive([([it("A", count=0), it("A", count=0)], META),
+                  ([it("A", count=0), it("A", count=3)], META),
+                  ([it("A", count=2), it("A", count=3)], META)])
     check("duplikate noekler: begge oekninger varsles", len(tickets(s)) == 2, s)
 
     # Motsatt rekkefoelge skal ikke gi varsel paa hver eneste sjekk.
-    _, s = drive([([it("A", count=3), it("A", count=0)], NORMAL)] * 6)
+    _, s = drive([([it("A", count=3), it("A", count=0)], META)] * 6)
     check("duplikate noekler gir ikke spam", len(tickets(s)) == 1, s)
 
 
 def test_uleselig():
-    print("\nUleselige kort")
+    print("\nUleselige produkter")
     # Baselinen er ukjent etter blindhet: et positivt antall skal varsles,
     # selv om det er LAVERE enn foer. Billettene kan ha vaert innom null.
-    _, s = drive([([it(count=4)], NORMAL), ([it(count=None)], NORMAL),
-                  ([it(count=None)], NORMAL), ([it(count=3)], NORMAL)])
+    _, s = drive([([it(count=4)], META), ([it(count=None)], META),
+                  ([it(count=None)], META), ([it(count=3)], META)])
     check("4 -> ULESELIG -> 3 varsler likevel", len(tickets(s)) == 2, s)
 
     # Men samme antall rett etter et blaff skal ikke spamme.
-    _, s = drive([([it(count=3)], NORMAL), ([it(count=None)], NORMAL),
-                  ([it(count=3)], NORMAL)])
+    _, s = drive([([it(count=3)], META), ([it(count=None)], META),
+                  ([it(count=3)], META)])
     check("3 -> ULESELIG -> 3 gir kun ett varsel", len(tickets(s)) == 1, s)
 
     # Navnloese kort kan ikke skilles fra hverandre og maa regnes uleselige,
     # ellers kollapser alle til samme noekkel og oekninger blir usynlige.
-    st, s = drive([([it("", "", 0), it("", "", 0)], NORMAL),
-                   ([it("", "", 0), it("", "", 6)], NORMAL),
-                   ([it("", "", 4), it("", "", 6)], NORMAL)])
-    check("kort uten navn flagges blindt", st["blind_streak"] >= 3, st["blind_streak"])
-    check("kort uten navn gir VARSLING NEDE", len(down_alerts(s)) >= 1, s)
+    st, s = drive([([it("", "", 0), it("", "", 0)], META),
+                   ([it("", "", 0), it("", "", 6)], META),
+                   ([it("", "", 4), it("", "", 6)], META)])
+    check("produkt uten navn flagges blindt", st["blind_streak"] >= 3, st["blind_streak"])
+    check("produkt uten navn gir VARSLING NEDE", len(down_alerts(s)) >= 1, s)
 
 
 def test_blind():
@@ -288,22 +242,18 @@ def test_blind():
     check("feilet blind-varsel proeves igjen straks", len(forsok) >= 2, len(forsok))
 
 
-def test_tom_liste():
-    print("\nTom liste og sidetilstand")
-    _, s = drive([([], TOM)] * 5)
-    check("ekte tom liste gir ingen varsler", len(s) == 0, s)
-
-    markup = dict(TOM, productMarkup=True)
-    _, s = drive([([], markup)] * 3)
-    check("tom liste med produktmarkup flagges", len(down_alerts(s)) >= 1, s)
-
-    _, s = drive([([], dict(TOM, queue=True))] * 3)
-    check("venterom flagges", len(down_alerts(s)) >= 1, s)
+def test_tom_katalog():
+    print("\nTom katalog")
+    # API-et sa uttrykkelig fra ved aa svare med feltet til stede og lista
+    # tom - det er en legitim tilstand, ikke et tegn paa at noe er galt.
+    st, s_ = drive([([], META)] * 5)
+    check("tom katalog gir ingen varsler", len(s_) == 0, s_)
+    check("tom katalog regnes ikke som blind", st["blind_streak"] == 0, st["blind_streak"])
 
 
 def test_levering():
     print("\nLevering av varsel")
-    st, _ = drive([([it(count=5)], NORMAL)], notify_ok=False)
+    st, _ = drive([([it(count=5)], META)], notify_ok=False)
     check("feilet varsel avanserer ikke baselinen", st["baselines"] == {}, st["baselines"])
 
     # Neste sjekk skal se samme oekning og faa den ut.
@@ -320,14 +270,14 @@ def test_levering():
     monitor.notify_diagnostic = lambda t, m, tags: None
     with contextlib.redirect_stdout(io.StringIO()):
         for i in range(2):
-            monitor.run_check([it(count=5)], NORMAL, False, st, now_ts=i * 20)
+            monitor.run_check([it(count=5)], META, False, st, now_ts=i * 20)
     check("varsel leveres ved neste sjekk etter feil",
           sent == ["NFF Resale - Ledige billetter!"], sent)
 
 
 def main():
-    for fn in (test_api, test_parsing, test_varsling, test_per_arrangement, test_uleselig,
-               test_blind, test_tom_liste, test_levering):
+    for fn in (test_api, test_varsling, test_per_arrangement, test_uleselig,
+               test_blind, test_tom_katalog, test_levering):
         fn()
     failed = [label for label, ok in _results if not ok]
     print(f"\n{len(_results) - len(failed)}/{len(_results)} bestått")

@@ -1,48 +1,21 @@
 # fotballfesten – resale-billettvarsler
 
-Overvåker NFFs videresalgsside og sender et push-varsel via [ntfy](https://ntfy.sh)
-når det dukker opp ledige resale-billetter til Ullevål.
+Overvåker NFFs videresalgskatalog og sender et push-varsel via [ntfy](https://ntfy.sh)
+når det dukker opp ledige resale-billetter.
 
-Overvåket side: `https://resale.fotball.no/list/resaleProducts/?lang=no`
+Endepunkt: `https://resale.fotball.no/list/resale/resaleProductCatalog.json`
 
-## To måter å hente data på
+## Hvordan antallet leses
 
-**API (foretrukket).** Siden backes av et JSON-endepunkt. Settes miljøvariabelen
-`RESALE_API_URL`, hentes antallet derfra – strukturert, uten nettleser, på
-brøkdelen av tiden. Da forsvinner også hele klassen av feil som følger av å lese
-tall ut av HTML.
+Katalogen hentes som JSON. Antallet leses fra `availableQuantity` på hvert
+produkt under `topicWithProductsList[].products[]`.
 
-Antallet leses fra `availableQuantity` på hvert produkt under
-`topicWithProductsList[].products[]`. Merk at `ticketCount` er `null` i praksis;
-den brukes bare som reserve. Er **begge** null, er antallet ukjent – ikke null.
+`ticketCount` er `null` i praksis og brukes bare som reserve. Er **begge** null,
+er antallet **ukjent** – ikke null. Den forskjellen er avgjørende: tolkes en
+lesefeil som «0 billetter», ser en ødelagt overvåker ut som helt normal drift,
+og varselet uteblir uten at noe ser galt ut i loggen.
 
-**Nettleser (fallback).** Uten `RESALE_API_URL`, og hver gang API-kallet feiler
-eller svarer med uventet struktur, rendres siden i headless Chromium via
-Playwright og antallet leses fra DOM-en. Siden er JavaScript-rendret: rå-HTML
-inneholder bare en «Laster opp»-spinner og maler.
-
-Fallbacken er poenget: et udokumentert internt API kan endres uten varsel, og da
-skal overvåkingen falle tilbake framfor å stoppe.
-
-## Oppsett
-
-```bash
-pip install -r requirements.txt
-playwright install chromium
-```
-
-## Kjøring
-
-```bash
-python monitor.py                 # hvert 10. sek via API, hvert 20. via nettleser
-python monitor.py -i 30           # sjekker hvert 30. sekund
-python monitor.py -d              # [DIAG]-logging for hver sjekk
-python monitor.py --once          # kjør én sjekk og avslutt
-python monitor.py --test-notify   # send testmelding til ntfy og avslutt
-```
-
-Abonner på varslene ved å legge til topicen `nff-resale-billetter` i ntfy-appen
-(eller åpne https://ntfy.sh/nff-resale-billetter).
+Negative og boolske verdier avvises på samme måte, som ukjent.
 
 ## Varslingslogikk
 
@@ -50,9 +23,10 @@ Antallet spores **per arrangement**, ikke som én sum. En ren sum ville skjult a
 ett arrangement stiger mens et annet synker – da kunne ekte nye billetter
 forsvinne i støyen fra et helt annet arrangement.
 
-Sporingsnøkkelen er `navn|sted`. Flere kort med samme nøkkel summeres. Mangler
-navnet, kan kortene ikke skilles fra hverandre, og kortet regnes som uleselig –
-ellers ville alle kollapset til én nøkkel og skjult økninger helt lydløst.
+Sporingsnøkkelen er `navn|sted`. Flere produkter med samme nøkkel summeres.
+Mangler navnet, kan produktene ikke skilles fra hverandre, og produktet regnes
+som uleselig – ellers ville alle kollapset til én nøkkel og skjult økninger helt
+lydløst.
 
 Varsel sendes når et arrangement får flere billetter enn sist, eller når et
 arrangement dukker opp med billetter (også ved oppstart/restart).
@@ -65,8 +39,8 @@ forsinke det ene varselet som haster.
 
 ### Baselinen etter en blind periode
 
-Var et kort uleselig, settes baselinen til **ukjent** – ikke til forrige verdi og
-ikke til 0. Begge de to enkle valgene er feil:
+Var et produkt uleselig, settes baselinen til **ukjent** – ikke til forrige verdi
+og ikke til 0. Begge de enkle valgene er feil:
 
 - Beholder man forrige verdi, kan et lavere, men ekte, antall bli usynlig:
   billettene kan ha vært innom null mens vi var blinde.
@@ -76,59 +50,48 @@ Med ukjent baseline varsler vi på ethvert positivt antall – heller ett
 unødvendig varsel enn ett tapt – men demper gjentakelser av nøyaktig samme
 antall i fem minutter.
 
-## Når overvåkingen ikke kan lese antallet
+## Når du får beskjed om at overvåkingen er nede
 
-Scriptet skiller mellom «det er 0 billetter» og «jeg klarte ikke lese
-antallet». Det er en viktig forskjell: tidligere ble alle lesefeil tolket som 0,
-slik at en ødelagt selektor så ut som helt normal drift i loggen – rolige
-`0 billett(er)` i det uendelige – mens ekte billetter gikk upåaktet hen.
-
-Antallet leses fra flere kilder i tur og orden, fra smalest til bredest:
-
-1. `.resale-availability .resale-list-number`
-2. `.resale-list-number` (i tilfelle wrapperen mangler)
-3. `.resale-availability`
-4. hele produktkortets tekst
-
-Hver kilde prøves mot «N av M billetter» (der N er antallet), mot
-«N billett(er)», og mot et blankt tall (`3`). Fraser der tallet ikke er et
-antall ledige filtreres bort – «maks 4 billetter per kjøp», og «av 12 billetter»
-uten teller foran, der 12 er totalen. Tusenskille normaliseres slik at
-«1 234 billetter» ikke leses som 234. Inneholder en kilde flere ulike tall foran
-«billett», gir vi opp i stedet for å gjette: et feil tall ville låst varslingen
-permanent, mens «uleselig» utløser varsel.
-
-«Utsolgt»/«ingen billetter» sjekkes først til slutt, når ingen kilde ga et tall.
-Da kan det ikke skygge for et ekte antall i en bredere kilde.
-
-Treffer ingenting, blir antallet `ULESELIG` – ikke 0. Råteksten og kortets HTML
-logges som `[DIAG]`.
-
-### Når du får beskjed om at overvåkingen er nede
-
-En sjekk regnes som blind når antallet er uleselig, når et kort mangler navn,
-når lista er tom uten at siden selv sier det (eller sier det mens lista likevel
-inneholder produkt-markup), når siden viser venterom/kø, **eller når selve
-sjekken kaster** – f.eks. fordi `#list_all_tickets` ikke lenger finnes. Det
-siste er den mest sannsynlige måten en strukturendring viser seg på, og det er
-derfor unntak telles med.
+En sjekk regnes som blind når et produkt mangler lesbart antall eller navn,
+**eller når selve sjekken kaster** – HTTP-feil, tidsavbrudd, eller et svar som
+ikke har forventet struktur (manglende `topicWithProductsList`, feil type, eller
+ingen produkter med lesbart antall). Uten at unntak telles med, ville den
+vanligste bruddformen gått helt stille forbi.
 
 Varsel («VARSLING NEDE») sendes ved tre blinde sjekker på rad, eller ved 10
-blinde blant de siste 20 – det siste fanger en side som feiler annenhver gang og
+blinde blant de siste 20 – det siste fanger et API som feiler annenhver gang og
 derfor aldri bygger opp en sammenhengende serie. Så lenge tilstanden varer,
 gjentas varselet tidligst hver halvtime, og telleren nullstilles bare når
-varselet faktisk ble levert.
+varselet faktisk ble levert. Friskmelding krever ti gode sjekker på rad, slik at
+et blaffende API ikke gir vekselvis «nede» og «virker igjen».
 
-Friskmelding krever ti gode sjekker på rad. Uten den terskelen ville en side som
-blaffer sendt «nede» og «virker igjen» om hverandre i det uendelige – og
-push-spam ender med at topicen dempes, og da er også det ekte billettvarselet
-borte.
+En tom katalog er derimot legitim: API-et sier uttrykkelig fra ved å svare med
+feltet til stede og lista tom.
 
-En sjekk som henger avbrytes etter to minutter og telles som blind.
+En sjekk som henger avbrytes etter ett minutt og telles som blind.
 
-Det som fortsatt **ikke** dekkes: dør prosessen helt, kan ingen varsling fyre
-fra innsiden. Overvåk derfor at tjenesten faktisk kjører i Railway – stillhet
-fra ntfy er ikke i seg selv bevis på at alt er i orden.
+Det som **ikke** dekkes: dør prosessen helt, kan ingen varsling fyre fra
+innsiden. Overvåk derfor at tjenesten faktisk kjører i Railway – stillhet fra
+ntfy er ikke i seg selv bevis på at alt er i orden.
+
+## Oppsett
+
+```bash
+pip install -r requirements.txt
+```
+
+## Kjøring
+
+```bash
+python monitor.py                 # sjekker hvert 10. sekund
+python monitor.py -i 5            # sjekker hvert 5. sekund
+python monitor.py -d              # [DIAG]-logging for hver sjekk
+python monitor.py --once          # kjør én sjekk og avslutt
+python monitor.py --test-notify   # send testmelding til ntfy og avslutt
+```
+
+Abonner på varslene ved å legge til topicen `nff-resale-billetter` i ntfy-appen
+(eller åpne https://ntfy.sh/nff-resale-billetter).
 
 ## Tester
 
@@ -136,32 +99,14 @@ fra ntfy er ikke i seg selv bevis på at alt er i orden.
 python3 test_monitor.py
 ```
 
-Kjører uten Playwright og requests installert. Hver test svarer til en konkret
-feil som har vært i koden, og er beholdt som regresjonsvern – flere av dem
-gjelder varsler som gikk tapt helt lydløst, uten at noen logglinje avslørte det.
+Kjører uten `requests` installert. Hver test svarer til en konkret feil som har
+vært i koden, og er beholdt som regresjonsvern – flere av dem gjelder varsler
+som gikk tapt helt lydløst, uten at noen logglinje avslørte det.
+`testdata/resale_empty.json` er et ekte svar fra endepunktet.
 
 ## Deploy på Railway
 
-Railway sin auto-bygger (Railpack, som er standard nå etter at Nixpacks ble
-utfaset) får som regel ikke med seg Chromium og systembibliotekene den krever.
-Derfor ligger det en `Dockerfile` i repoet som bruker Playwrights offisielle
-image – da er Chromium og alle OS-avhengigheter ferdig installert.
-
-1. Railway oppdager `Dockerfile` automatisk og bruker den i stedet for
-   auto-byggeren (Railpack/Nixpacks).
-2. Entrypointet er `python monitor.py` (satt som `CMD` i Dockerfile) – ingen
-   ekstra start-kommando trengs.
-3. Tjenesten er en bakgrunns-worker og lytter ikke på noen HTTP-port, så du
-   trenger ikke sette opp en port eller healthcheck.
-
-Hold Playwright-versjonen i `requirements.txt` og image-taggen i `Dockerfile`
-(`v1.62.0-jammy`) omtrent i synk når du oppgraderer.
-
-## Miljøvariabler
-
-- `RESALE_API_URL` – JSON-endepunktet som backer resale-siden. Er den satt,
-  brukes API-et, og nettleseren beholdes kun som fallback. Er den tom, går alt
-  via nettleseren som før.
-- `PLAYWRIGHT_CHROMIUM_PATH` – valgfri sti til Chromium-binæren dersom
-  Playwright ikke finner nettleseren selv. Trengs ikke med Docker-imaget
-  over, eller etter `playwright install chromium` lokalt.
+Repoet har en `Dockerfile` som Railway plukker opp automatisk og bruker i stedet
+for auto-byggeren. Entrypointet er `python monitor.py`, satt som `CMD`.
+Tjenesten er en bakgrunns-worker og lytter ikke på noen HTTP-port, så det trengs
+verken port eller healthcheck.
