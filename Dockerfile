@@ -1,9 +1,7 @@
-# Offisielt Playwright-image: Chromium + alle OS-avhengigheter er
-# ferdig installert. Image-taggen MÅ matche den låste playwright-versjonen
-# i requirements.txt (v1.62.0-jammy <-> playwright==1.62.0), ellers leter
-# Playwright etter en Chromium-build som ikke finnes i imaget, og launch()
-# feiler. Bump begge samtidig ved oppgradering.
-FROM mcr.microsoft.com/playwright/python:v1.62.0-jammy
+# Rent Python-image. Tidligere krevde scriptet Playwrights image fordi
+# siden ble rendret i headless Chromium; nå hentes katalogen som JSON, og
+# eneste avhengighet er requests.
+FROM python:3.12-slim
 
 WORKDIR /app
 
