@@ -1,97 +1,67 @@
 # fotballfesten – resale-billettvarsler
 
-Overvåker NFFs videresalgskatalog og sender et push-varsel via [ntfy](https://ntfy.sh)
-når det dukker opp ledige resale-billetter.
+Sender et push-varsel via [ntfy](https://ntfy.sh) når det dukker opp ledige
+resale-billetter hos NFF.
 
-Endepunkt: `https://resale.fotball.no/list/resale/resaleProductCatalog.json`
+Katalogen hentes som JSON én gang i sekundet fra
+`https://resale.fotball.no/list/resale/resaleProductCatalog.json`.
+Antallet ledige ligger i `availableQuantity` per arrangement.
 
-## Hvordan antallet leses
+## To ting å vite før du endrer noe
 
-Katalogen hentes som JSON. Antallet leses fra `availableQuantity` på hvert
-produkt under `topicWithProductsList[].products[]`.
+**`availableQuantity` kan være `null`, og null er ikke null billetter.** Det
+betyr at vi ikke fikk lest antallet. Tolkes de to likt, ser en ødelagt
+overvåker ut som helt normal drift, og varselet uteblir uten at noe ser galt ut
+i loggen. Det var den opprinnelige feilen i dette prosjektet.
 
-`ticketCount` er `null` i praksis og brukes bare som reserve. Er **begge** null,
-er antallet **ukjent** – ikke null. Den forskjellen er avgjørende: tolkes en
-lesefeil som «0 billetter», ser en ødelagt overvåker ut som helt normal drift,
-og varselet uteblir uten at noe ser galt ut i loggen.
+**Derfor sier scriptet fra når det ikke får lest katalogen.** Stillhet fra ntfy
+skal bety «ingen billetter», ikke «overvåkingen er død».
 
-Negative og boolske verdier avvises på samme måte, som ukjent.
+## Oppførsel
 
-## Varslingslogikk
+Varsel sendes når et arrangement har flere billetter enn sist, eller dukker opp
+med billetter (også ved oppstart). Antallet spores per arrangement, ikke som én
+sum – ellers kunne en økning på ett arrangement blitt skjult av en nedgang på et
+annet.
 
-Antallet spores **per arrangement**, ikke som én sum. En ren sum ville skjult at
-ett arrangement stiger mens et annet synker – da kunne ekte nye billetter
-forsvinne i støyen fra et helt annet arrangement.
+Feiler push-varselet, oppdateres ikke tilstanden. Neste sjekk ser samme økning
+og prøver på nytt ett sekund senere.
 
-Sporingsnøkkelen er `navn|sted`. Flere produkter med samme nøkkel summeres.
-Mangler navnet, kan produktene ikke skilles fra hverandre, og produktet regnes
-som uleselig – ellers ville alle kollapset til én nøkkel og skjult økninger helt
-lydløst.
+Feiler selve hentingen – HTTP-feil, uventet struktur, eller et arrangement uten
+lesbart antall – varsles det etter `BLIND_AFTER` sekunder sammenhengende feil,
+og gjentas høyst hver `BLIND_REPEAT`. Når det virker igjen, kommer en
+friskmelding (bare hvis vi faktisk rakk å si fra).
 
-Varsel sendes når et arrangement får flere billetter enn sist, eller når et
-arrangement dukker opp med billetter (også ved oppstart/restart).
+Loggen skriver bare når statusen endrer seg, pluss et livstegn hvert
+`LOG_EVERY`. Én linje i sekundet ville gjort den ubrukelig.
 
-Feiler selve push-varselet (ntfy nede, 429), avanseres **ikke** baselinen. Neste
-sjekk ser samme økning og prøver på nytt, slik at et varsel ikke går tapt på en
-forbigående nettverksfeil. Billettvarselet sendes alltid før diagnosevarslene,
-og diagnosevarsler bruker ett forsøk med kort timeout – de skal aldri kunne
-forsinke det ene varselet som haster.
+## Justerbart
 
-### Baselinen etter en blind periode
+| Konstant | Standard | Betydning |
+|---|---|---|
+| `POLL_INTERVAL` | 1 s | mellom hver sjekk |
+| `REQUEST_TIMEOUT` | 10 s | på HTTP-kall |
+| `BLIND_AFTER` | 60 s | sammenhengende feil før vi varsler |
+| `BLIND_REPEAT` | 1800 s | mellom gjentatte «nede»-varsler |
+| `LOG_EVERY` | 300 s | mellom ellers uendrede statuslinjer |
 
-Var et produkt uleselig, settes baselinen til **ukjent** – ikke til forrige verdi
-og ikke til 0. Begge de enkle valgene er feil:
-
-- Beholder man forrige verdi, kan et lavere, men ekte, antall bli usynlig:
-  billettene kan ha vært innom null mens vi var blinde.
-- Setter man 0, gir hvert eneste blaff et nytt varsel.
-
-Med ukjent baseline varsler vi på ethvert positivt antall – heller ett
-unødvendig varsel enn ett tapt – men demper gjentakelser av nøyaktig samme
-antall i fem minutter.
-
-## Når du får beskjed om at overvåkingen er nede
-
-En sjekk regnes som blind når et produkt mangler lesbart antall eller navn,
-**eller når selve sjekken kaster** – HTTP-feil, tidsavbrudd, eller et svar som
-ikke har forventet struktur (manglende `topicWithProductsList`, feil type, eller
-ingen produkter med lesbart antall). Uten at unntak telles med, ville den
-vanligste bruddformen gått helt stille forbi.
-
-Varsel («VARSLING NEDE») sendes ved tre blinde sjekker på rad, eller ved 10
-blinde blant de siste 20 – det siste fanger et API som feiler annenhver gang og
-derfor aldri bygger opp en sammenhengende serie. Så lenge tilstanden varer,
-gjentas varselet tidligst hver halvtime, og telleren nullstilles bare når
-varselet faktisk ble levert. Friskmelding krever ti gode sjekker på rad, slik at
-et blaffende API ikke gir vekselvis «nede» og «virker igjen».
-
-En tom katalog er derimot legitim: API-et sier uttrykkelig fra ved å svare med
-feltet til stede og lista tom.
-
-En sjekk som henger avbrytes etter ett minutt og telles som blind.
-
-Det som **ikke** dekkes: dør prosessen helt, kan ingen varsling fyre fra
-innsiden. Overvåk derfor at tjenesten faktisk kjører i Railway – stillhet fra
-ntfy er ikke i seg selv bevis på at alt er i orden.
-
-## Oppsett
-
-```bash
-pip install -r requirements.txt
-```
+Ett sekunds intervall er ~86 000 forespørsler i døgnet mot et udokumentert
+internt endepunkt. Blir vi rate-limitet, kommer det fram som vedvarende feil og
+dermed et «VARSLING NEDE»-varsel – da er det bare å øke `POLL_INTERVAL`.
 
 ## Kjøring
 
 ```bash
-python monitor.py                 # sjekker hvert 10. sekund
-python monitor.py -i 5            # sjekker hvert 5. sekund
-python monitor.py -d              # [DIAG]-logging for hver sjekk
-python monitor.py --once          # kjør én sjekk og avslutt
-python monitor.py --test-notify   # send testmelding til ntfy og avslutt
+pip install -r requirements.txt
+
+python monitor.py                 # hvert sekund
+python monitor.py -i 5            # hvert 5. sekund
+python monitor.py --once          # én sjekk, exit 1 hvis den feilet
+python monitor.py --test-notify   # send testmelding til ntfy
 ```
 
-Abonner på varslene ved å legge til topicen `nff-resale-billetter` i ntfy-appen
-(eller åpne https://ntfy.sh/nff-resale-billetter).
+Abonner på topicen `nff-resale-billetter` i ntfy-appen, eller åpne
+https://ntfy.sh/nff-resale-billetter.
 
 ## Tester
 
@@ -99,14 +69,14 @@ Abonner på varslene ved å legge til topicen `nff-resale-billetter` i ntfy-appe
 python3 test_monitor.py
 ```
 
-Kjører uten `requests` installert. Hver test svarer til en konkret feil som har
-vært i koden, og er beholdt som regresjonsvern – flere av dem gjelder varsler
-som gikk tapt helt lydløst, uten at noen logglinje avslørte det.
-`testdata/resale_empty.json` er et ekte svar fra endepunktet.
+Kjører uten `requests` installert. `testdata/resale_empty.json` er et ekte svar
+fra endepunktet.
 
 ## Deploy på Railway
 
-Repoet har en `Dockerfile` som Railway plukker opp automatisk og bruker i stedet
-for auto-byggeren. Entrypointet er `python monitor.py`, satt som `CMD`.
-Tjenesten er en bakgrunns-worker og lytter ikke på noen HTTP-port, så det trengs
-verken port eller healthcheck.
+`Dockerfile` plukkes opp automatisk. Entrypointet er `python monitor.py`.
+Tjenesten er en bakgrunns-worker uten HTTP-port, så det trengs verken port
+eller healthcheck.
+
+Det som **ikke** dekkes: dør prosessen helt, kan ingen varsling fyre fra
+innsiden. Overvåk at tjenesten faktisk kjører i Railway.
