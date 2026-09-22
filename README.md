@@ -30,7 +30,14 @@ og prøver på nytt ett sekund senere.
 Feiler selve hentingen – HTTP-feil, uventet struktur, eller et arrangement uten
 lesbart antall – varsles det etter `BLIND_AFTER` sekunder sammenhengende feil,
 og gjentas høyst hver `BLIND_REPEAT`. Når det virker igjen, kommer en
-friskmelding (bare hvis vi faktisk rakk å si fra).
+friskmelding (bare hvis vi faktisk rakk å si fra). Feiler friskmeldingen,
+prøves den igjen neste sjekk.
+
+Ett arrangement uten lesbart antall gjør oss ikke blinde for de andre: de
+lesbare antallene brukes fortsatt til billettvarsler, samtidig som feilen teller
+mot «nede»-varselet.
+
+Trykk på et varsel åpner resale-siden.
 
 Loggen skriver bare når statusen endrer seg, pluss et livstegn hvert
 `LOG_EVERY`. Én linje i sekundet ville gjort den ubrukelig.
@@ -44,6 +51,11 @@ Loggen skriver bare når statusen endrer seg, pluss et livstegn hvert
 | `BLIND_AFTER` | 60 s | sammenhengende feil før vi varsler |
 | `BLIND_REPEAT` | 1800 s | mellom gjentatte «nede»-varsler |
 | `LOG_EVERY` | 300 s | mellom ellers uendrede statuslinjer |
+
+Varslene går til `https://ntfy.sh/nff-resale-billetter`, eller til
+miljøvariabelen `NTFY_URL` hvis den er satt. ntfy-topics er offentlige – alle som
+kjenner navnet kan lese og poste – så sett gjerne `NTFY_URL` i Railway til en
+topic med et navn som er vanskelig å gjette.
 
 Ett sekunds intervall er ~86 000 forespørsler i døgnet mot et udokumentert
 internt endepunkt. Blir vi rate-limitet, kommer det fram som vedvarende feil og
@@ -66,10 +78,11 @@ https://ntfy.sh/nff-resale-billetter.
 ## Tester
 
 ```bash
-python3 test_monitor.py
+python3 -m unittest -v
 ```
 
-Kjører uten `requests` installert. `testdata/resale_empty.json` er et ekte svar
+Kjører uten `requests` installert, og kjøres automatisk av GitHub Actions på
+push og pull requests. `testdata/resale_empty.json` er et ekte svar
 fra endepunktet.
 
 ## Deploy på Railway

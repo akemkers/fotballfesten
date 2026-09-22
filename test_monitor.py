@@ -1,34 +1,27 @@
 """Tester for monitor.py.
 
-Kjøres uten `requests` installert - modulen stubbes ut, og `send`
-monkeypatches, slik at beslutningslogikken kan drives uten nettverk.
+Kjøres uten `requests` installert - modulen stubbes ut, og varslingen
+injiseres som `notify`, slik at beslutningslogikken kan drives uten nettverk.
 
-    python3 test_monitor.py
+    python3 -m unittest -v
 
 Testene beskriver oppførsel, ikke mekanikk: hva som skal utløse et varsel,
 og hva som skal si fra når overvåkingen ikke virker.
 """
 import contextlib
-import importlib.util
 import io
 import json
 import os
 import sys
 import types
+import unittest
 
 sys.modules.setdefault("requests", types.ModuleType("requests"))
-_here = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location("monitor", os.path.join(_here, "monitor.py"))
-monitor = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(monitor)
+import monitor  # noqa: E402
 
-FIXTURE = os.path.join(_here, "testdata", "resale_empty.json")
-_results = []
-
-
-def check(label, ok, detail=""):
-    _results.append(ok)
-    print(f"  [{'PASS' if ok else 'FAIL'}] {label}" + (f"\n         {detail}" if detail and not ok else ""))
+FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "testdata", "resale_empty.json")
+FAIL = (None, "HTTP 503")
 
 
 def catalogue(*products):
@@ -39,169 +32,193 @@ def product(name="Kamp", venue="Ullevaal", quantity=0):
     return {"name": name, "venue": venue, "availableQuantity": quantity, "ticketCount": None}
 
 
-def run(steps, state=None, send_ok=True):
-    """Kjører en serie (antall, feil)-steg. Returnerer (tilstand, sendte varsler)."""
-    state = state or monitor.new_state()
-    sent = []
+class FakeNotify:
+    """Tar imot varsler. `results` styrer hva hvert kall returnerer;
+    når listen er tom, lykkes kallene."""
 
-    def fake_send(title, message, priority="5", tags=""):
-        if not send_ok:
-            return False
-        sent.append((title, message))
-        return True
+    def __init__(self, *results):
+        self.results = list(results)
+        self.sent = []
 
-    monitor.send = fake_send
+    def __call__(self, title, message, priority="5", tags=""):
+        ok = self.results.pop(0) if self.results else True
+        if ok:
+            self.sent.append((title, message))
+        return ok
+
+    def titled(self, word):
+        return [m for t, m in self.sent if word in t]
+
+
+def run(steps, notify=None, state=None):
+    """Kjører en serie (antall, feil)-steg, ett sekund fra hverandre."""
+    state = state or monitor.State()
+    notify = notify or FakeNotify()
     with contextlib.redirect_stdout(io.StringIO()):
-        for i, (counts, problem) in enumerate(steps):
-            monitor.step(state, counts, problem, i)
-    return state, sent
+        for now, (counts, problem) in enumerate(steps):
+            monitor.step(state, counts, problem, now, notify)
+    return state, notify
 
 
-def titles(sent, word):
-    return [m for t, m in sent if word in t]
+class Lesing(unittest.TestCase):
+    def test_ekte_svar(self):
+        with open(FIXTURE, encoding="utf-8") as fh:
+            counts, unreadable = monitor.read_counts(json.load(fh))
+        self.assertEqual(counts, {"Nations League - A-herrer @ Ullevaal Stadion": 0})
+        self.assertEqual(unreadable, 0)
+
+    def test_positivt_antall(self):
+        counts, _ = monitor.read_counts(catalogue(product(quantity=3)))
+        self.assertEqual(list(counts.values()), [3])
+
+    def test_null_er_ikke_null_billetter(self):
+        counts, unreadable = monitor.read_counts(catalogue(product(quantity=None)))
+        self.assertEqual((counts, unreadable), ({}, 1))
+
+    def test_ugyldige_antall(self):
+        for value in (True, -1, "3", 1.5):
+            with self.subTest(value=value):
+                _, unreadable = monitor.read_counts(catalogue(product(quantity=value)))
+                self.assertEqual(unreadable, 1)
+
+    def test_uten_navn(self):
+        _, unreadable = monitor.read_counts(catalogue(product(name="")))
+        self.assertEqual(unreadable, 1)
+
+    def test_duplikater_summeres(self):
+        # Ellers kunne en økning på den første bli borte.
+        counts, _ = monitor.read_counts(catalogue(product(quantity=2), product(quantity=3)))
+        self.assertEqual(list(counts.values()), [5])
+
+    def test_uventet_form_kaster(self):
+        for bad in ({}, {"topicWithProductsList": 5}):
+            with self.subTest(bad=bad), self.assertRaises(Exception):
+                monitor.read_counts(bad)
 
 
-def test_lesing():
-    print("\nLesing av katalogen")
-    with open(FIXTURE, encoding="utf-8") as fh:
-        counts, unreadable = monitor.read_counts(json.load(fh))
-    check("ekte svar gir ett arrangement", len(counts) == 1, counts)
-    check("navn og sted blir noekkel",
-          "Nations League - A-herrer @ Ullevaal Stadion" in counts, counts)
-    check("availableQuantity=0 leses som 0", list(counts.values()) == [0], counts)
-    check("ingen uleselige", unreadable == 0, unreadable)
+class FakeSession:
+    def __init__(self, data=None, error=None):
+        self.data, self.error = data, error
 
-    counts, _ = monitor.read_counts(catalogue(product(quantity=3)))
-    check("availableQuantity=3 leses som 3", list(counts.values()) == [3], counts)
-
-    # null er IKKE null billetter - det er et ulest antall.
-    counts, unreadable = monitor.read_counts(catalogue(product(quantity=None)))
-    check("null antall telles som uleselig", counts == {} and unreadable == 1, (counts, unreadable))
-    for verdi in (True, -1, "3"):
-        _c, u = monitor.read_counts(catalogue(product(quantity=verdi)))
-        check(f"{verdi!r} telles som uleselig", u == 1, u)
-
-    counts, u = monitor.read_counts(catalogue(product(name="")))
-    check("arrangement uten navn telles som uleselig", u == 1, u)
-
-    # Duplikater summeres, ellers kunne en oekning paa den foerste bli borte.
-    counts, _ = monitor.read_counts(catalogue(product(quantity=2), product(quantity=3)))
-    check("duplikate arrangementer summeres", list(counts.values()) == [5], counts)
-
-    for bad, label in [({}, "manglende felt"), ({"topicWithProductsList": 5}, "feil type")]:
-        try:
-            monitor.read_counts(bad)
-            check(f"{label} kaster", False, "ingen feil")
-        except Exception:
-            check(f"{label} kaster", True)
+    def get(self, *args, **kwargs):
+        if self.error:
+            raise self.error
+        return types.SimpleNamespace(raise_for_status=lambda: None, json=lambda: self.data)
 
 
-def test_varsling():
-    print("\nBillettvarsling")
-    _, sent = run([({"A": 0}, None)] * 10)
-    check("stabil 0 gir ingen varsler", sent == [], sent)
+class Henting(unittest.TestCase):
+    def test_alt_lest(self):
+        counts, problem = monitor.check(FakeSession(catalogue(product(quantity=2))))
+        self.assertEqual((list(counts.values()), problem), ([2], None))
 
-    _, sent = run([({"A": 0}, None), ({"A": 3}, None)])
-    check("0 -> 3 varsler", len(sent) == 1 and "3" in sent[0][1], sent)
+    def test_uleselig_arrangement_beholder_de_lesbare(self):
+        data = catalogue(product(name="A", quantity=4), product(name="B", quantity=None))
+        counts, problem = monitor.check(FakeSession(data))
+        self.assertEqual(counts, {"A @ Ullevaal": 4})
+        self.assertIn("uten lesbart antall", problem)
 
-    _, sent = run([({"A": 2}, None)])
-    check("billetter ved oppstart varsler", len(sent) == 1, sent)
-
-    _, sent = run([({"A": 2}, None), ({"A": 5}, None)])
-    check("2 -> 5 varsler igjen", len(sent) == 2, sent)
-
-    _, sent = run([({"A": 5}, None), ({"A": 2}, None), ({"A": 2}, None)])
-    check("nedgang varsler ikke", len(sent) == 1, sent)
-
-    # En sum ville skjult at B stiger mens A synker.
-    _, sent = run([({"A": 3, "B": 0}, None), ({"A": 1, "B": 2}, None)])
-    check("oekning skjules ikke av annet arrangement", len(sent) == 2 and "B" in sent[1][1], sent)
+    def test_nettverksfeil(self):
+        counts, problem = monitor.check(FakeSession(error=TimeoutError("treigt")))
+        self.assertIsNone(counts)
+        self.assertIn("TimeoutError", problem)
 
 
-def test_levering():
-    print("\nLevering")
-    st, _ = run([({"A": 5}, None)], send_ok=False)
-    check("feilet varsel avanserer ikke tilstanden", st["counts"] == {}, st["counts"])
+class Billettvarsling(unittest.TestCase):
+    def test_stabil_null(self):
+        _, notify = run([({"A": 0}, None)] * 10)
+        self.assertEqual(notify.sent, [])
 
-    # Neste sjekk skal se samme oekning og faa den ut.
-    state = monitor.new_state()
-    sent = []
-    kall = {"n": 0}
+    def test_okning_varsler(self):
+        _, notify = run([({"A": 0}, None), ({"A": 3}, None)])
+        self.assertEqual(len(notify.sent), 1)
+        self.assertIn("3", notify.sent[0][1])
 
-    def flaky(title, message, priority="5", tags=""):
-        kall["n"] += 1
-        if kall["n"] == 1:
-            return False
-        sent.append(title)
-        return True
+    def test_billetter_ved_oppstart(self):
+        _, notify = run([({"A": 2}, None)])
+        self.assertEqual(len(notify.sent), 1)
 
-    monitor.send = flaky
-    with contextlib.redirect_stdout(io.StringIO()):
-        for i in range(2):
-            monitor.step(state, {"A": 5}, None, i)
-    check("varselet kommer ut ved neste sjekk", sent == ["NFF Resale - Ledige billetter!"], sent)
+    def test_ny_okning_varsler_igjen(self):
+        _, notify = run([({"A": 2}, None), ({"A": 5}, None)])
+        self.assertEqual(len(notify.sent), 2)
 
+    def test_nedgang_varsler_ikke(self):
+        _, notify = run([({"A": 5}, None), ({"A": 2}, None), ({"A": 2}, None)])
+        self.assertEqual(len(notify.sent), 1)
 
-def test_nede():
-    print("\nNår overvåkingen ikke virker")
-    _, sent = run([(None, "HTTP 503")] * 30)
-    check("kortvarig feil varsler ikke", sent == [], sent)
+    def test_okning_skjules_ikke_av_annet_arrangement(self):
+        # En sum ville skjult at B stiger mens A synker.
+        _, notify = run([({"A": 3, "B": 0}, None), ({"A": 1, "B": 2}, None)])
+        self.assertEqual(len(notify.sent), 2)
+        self.assertIn("B", notify.sent[1][1])
 
-    steps = [(None, "HTTP 503")] * (monitor.BLIND_AFTER + 5)
-    _, sent = run(steps)
-    check("vedvarende feil varsler", len(titles(sent, "NEDE")) == 1, sent)
-
-    # Ett varsel, ikke ett i sekundet.
-    steps = [(None, "HTTP 503")] * (monitor.BLIND_AFTER + 600)
-    _, sent = run(steps)
-    check("gjentas ikke oftere enn BLIND_REPEAT", len(titles(sent, "NEDE")) == 1, len(titles(sent, "NEDE")))
-
-    steps = [(None, "HTTP 503")] * (monitor.BLIND_AFTER + monitor.BLIND_REPEAT + 5)
-    _, sent = run(steps)
-    check("gjentas etter BLIND_REPEAT", len(titles(sent, "NEDE")) == 2, len(titles(sent, "NEDE")))
-
-    # Friskmelding bare hvis vi faktisk sa fra.
-    steps = [(None, "HTTP 503")] * (monitor.BLIND_AFTER + 5) + [({"A": 0}, None)]
-    _, sent = run(steps)
-    check("friskmelding etter nede-varsel", len(titles(sent, "virker igjen")) == 1, sent)
-
-    steps = [(None, "HTTP 503")] * 10 + [({"A": 0}, None)]
-    _, sent = run(steps)
-    check("ingen friskmelding uten nede-varsel", sent == [], sent)
-
-    # Uleselig antall behandles som feil, ikke som null billetter.
-    steps = [(None, "1 arrangement(er) uten lesbart antall")] * (monitor.BLIND_AFTER + 5)
-    _, sent = run(steps)
-    check("uleselig antall varsler som nede", len(titles(sent, "NEDE")) == 1, sent)
+    def test_uleselig_arrangement_blinder_ikke_de_andre(self):
+        problem = "1 arrangement(er) uten lesbart antall"
+        _, notify = run([({"A": 0}, problem), ({"A": 4}, problem)])
+        self.assertEqual(len(notify.titled("Ledige")), 1)
 
 
-def test_logg():
-    print("\nLogging")
-    state = monitor.new_state()
-    monitor.send = lambda *a, **k: True
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        for i in range(120):
-            monitor.step(state, {"A": 0}, None, i)
-    linjer = [l for l in out.getvalue().strip().split("\n") if l]
-    check("uendret status spammer ikke loggen", len(linjer) == 1, f"{len(linjer)} linjer")
+class Levering(unittest.TestCase):
+    def test_feilet_varsel_avanserer_ikke_tilstanden(self):
+        state, _ = run([({"A": 5}, None)], FakeNotify(False))
+        self.assertEqual(state.counts, {})
 
-    state = monitor.new_state()
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        for i in range(monitor.LOG_EVERY + 10):
-            monitor.step(state, {"A": 0}, None, i)
-    linjer = [l for l in out.getvalue().strip().split("\n") if l]
-    check("livstegn etter LOG_EVERY", len(linjer) == 2, f"{len(linjer)} linjer")
+    def test_varselet_kommer_ut_ved_neste_sjekk(self):
+        _, notify = run([({"A": 5}, None)] * 2, FakeNotify(False))
+        self.assertEqual([t for t, _ in notify.sent], ["NFF Resale - Ledige billetter!"])
+
+    def test_feilet_friskmelding_prøves_igjen(self):
+        steps = [FAIL] * (monitor.BLIND_AFTER + 1) + [({"A": 0}, None)] * 2
+        # Nede-varselet lykkes, første friskmelding feiler.
+        _, notify = run(steps, FakeNotify(True, False))
+        self.assertEqual(len(notify.titled("virker igjen")), 1)
 
 
-def main():
-    for fn in (test_lesing, test_varsling, test_levering, test_nede, test_logg):
-        fn()
-    feil = len(_results) - sum(_results)
-    print(f"\n{sum(_results)}/{len(_results)} bestått")
-    return 1 if feil else 0
+class Nede(unittest.TestCase):
+    def test_kortvarig_feil_varsler_ikke(self):
+        _, notify = run([FAIL] * 30)
+        self.assertEqual(notify.sent, [])
+
+    def test_vedvarende_feil_varsler(self):
+        _, notify = run([FAIL] * (monitor.BLIND_AFTER + 5))
+        self.assertEqual(len(notify.titled("NEDE")), 1)
+
+    def test_ett_varsel_ikke_ett_i_sekundet(self):
+        _, notify = run([FAIL] * (monitor.BLIND_AFTER + 600))
+        self.assertEqual(len(notify.titled("NEDE")), 1)
+
+    def test_gjentas_etter_blind_repeat(self):
+        _, notify = run([FAIL] * (monitor.BLIND_AFTER + monitor.BLIND_REPEAT + 5))
+        self.assertEqual(len(notify.titled("NEDE")), 2)
+
+    def test_friskmelding_etter_nede_varsel(self):
+        _, notify = run([FAIL] * (monitor.BLIND_AFTER + 5) + [({"A": 0}, None)])
+        self.assertEqual(len(notify.titled("virker igjen")), 1)
+
+    def test_ingen_friskmelding_uten_nede_varsel(self):
+        _, notify = run([FAIL] * 10 + [({"A": 0}, None)])
+        self.assertEqual(notify.sent, [])
+
+    def test_uleselig_antall_varsler_som_nede(self):
+        problem = (None, "1 arrangement(er) uten lesbart antall")
+        _, notify = run([problem] * (monitor.BLIND_AFTER + 5))
+        self.assertEqual(len(notify.titled("NEDE")), 1)
+
+
+class Logging(unittest.TestCase):
+    def lines(self, n):
+        state = monitor.State()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            for now in range(n):
+                monitor.step(state, {"A": 0}, None, now, FakeNotify())
+        return out.getvalue().strip().splitlines()
+
+    def test_uendret_status_spammer_ikke(self):
+        self.assertEqual(len(self.lines(120)), 1)
+
+    def test_livstegn_etter_log_every(self):
+        self.assertEqual(len(self.lines(monitor.LOG_EVERY + 10)), 2)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    unittest.main()
