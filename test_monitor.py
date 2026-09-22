@@ -1,12 +1,6 @@
-"""Tester for monitor.py.
-
-Kjøres uten `requests` installert - modulen stubbes ut, og varslingen
-injiseres som `notify`, slik at beslutningslogikken kan drives uten nettverk.
+"""Tester for monitor.py. Krever verken nettverk eller `requests`.
 
     python3 -m unittest -v
-
-Testene beskriver oppførsel, ikke mekanikk: hva som skal utløse et varsel,
-og hva som skal si fra når overvåkingen ikke virker.
 """
 import contextlib
 import io
@@ -33,8 +27,7 @@ def product(name="Kamp", venue="Ullevaal", quantity=0):
 
 
 class FakeNotify:
-    """Tar imot varsler. `results` styrer hva hvert kall returnerer;
-    når listen er tom, lykkes kallene."""
+    """Falsk `send`. `results` gir returverdien per kall; tom liste gir True."""
 
     def __init__(self, *results):
         self.results = list(results)
@@ -86,7 +79,6 @@ class Lesing(unittest.TestCase):
         self.assertEqual(unreadable, 1)
 
     def test_duplikater_summeres(self):
-        # Ellers kunne en økning på den første bli borte.
         counts, _ = monitor.read_counts(catalogue(product(quantity=2), product(quantity=3)))
         self.assertEqual(list(counts.values()), [5])
 
@@ -146,7 +138,7 @@ class Billettvarsling(unittest.TestCase):
         self.assertEqual(len(notify.sent), 1)
 
     def test_okning_skjules_ikke_av_annet_arrangement(self):
-        # En sum ville skjult at B stiger mens A synker.
+        # En sum ville skjult at B stiger når A synker.
         _, notify = run([({"A": 3, "B": 0}, None), ({"A": 1, "B": 2}, None)])
         self.assertEqual(len(notify.sent), 2)
         self.assertIn("B", notify.sent[1][1])
@@ -168,7 +160,7 @@ class Levering(unittest.TestCase):
 
     def test_feilet_friskmelding_prøves_igjen(self):
         steps = [FAIL] * (monitor.BLIND_AFTER + 1) + [({"A": 0}, None)] * 2
-        # Nede-varselet lykkes, første friskmelding feiler.
+        # «Nede» lykkes, første friskmelding feiler.
         _, notify = run(steps, FakeNotify(True, False))
         self.assertEqual(len(notify.titled("virker igjen")), 1)
 
