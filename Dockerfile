@@ -11,7 +11,11 @@ ENV PYTHONUNBUFFERED=1
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Bare det som trengs i drift - tester og testdata holdes utenfor imaget.
+COPY monitor.py .
+
+# Ingen grunn til å kjøre som root.
+USER nobody
 
 # Enkelt entrypoint - ingen HTTP-port, kjører som en bakgrunns-worker.
 CMD ["python", "monitor.py"]
