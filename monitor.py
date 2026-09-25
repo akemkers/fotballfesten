@@ -25,6 +25,7 @@ BLIND_AFTER = 60         # feil før «nede»-varsel
 BLIND_REPEAT = 1800      # tid mellom gjentatte «nede»-varsler
 LOG_EVERY = 300          # livstegn i loggen
 NTFY_RETRY = 15          # lengste pause mellom ntfy-forsøk når ntfy feiler
+FETCH_RETRY = 300        # lengste pause mellom hentinger når katalogen feiler
 
 HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -106,21 +107,22 @@ def check(session):
 
 @dataclass
 class Backoff:
-    """Ventetid før neste ntfy-forsøk etter en feil.
+    """Ventetid før neste forsøk etter en feil.
 
-    Pausen dobles for hver feil på rad: 1, 2, 4 og 8 sekunder, deretter
-    NTFY_RETRY. Et kort brudd hos ntfy forsinker varselet bare ett sekund,
-    og er ntfy nede lenge, sender vi ikke et forsøk hvert sekund.
+    Pausen dobles for hver feil på rad: 1, 2, 4 … sekunder, opp til `limit`.
+    Et kort brudd koster bare ett sekund, og en tjeneste som er nede eller
+    blokkerer oss, får ikke et kall hvert sekund.
     """
-    failures: int = 0
+    limit: float
+    delay: float = 0
     retry_at: float = 0
 
     def failed(self, now):
-        self.retry_at = now + min(2 ** self.failures, NTFY_RETRY)
-        self.failures += 1
+        self.delay = min(max(2 * self.delay, 1), self.limit)
+        self.retry_at = now + self.delay
 
     def reset(self):
-        self.failures = 0
+        self.delay = 0
         self.retry_at = 0
 
 
@@ -134,14 +136,20 @@ class State:
     unsent: dict = field(default_factory=dict)  # økninger som ikke er varslet
     # Egen pause per varseltype, så et feilet helsevarsel ikke holder
     # igjen et billettvarsel.
-    ticket_ntfy: Backoff = field(default_factory=Backoff)
-    health_ntfy: Backoff = field(default_factory=Backoff)
+    ticket_ntfy: Backoff = field(default_factory=lambda: Backoff(NTFY_RETRY))
+    health_ntfy: Backoff = field(default_factory=lambda: Backoff(NTFY_RETRY))
+    # Pause i hentingen når katalogen ikke svarer, f.eks. ved 403 fordi
+    # NFF blokkerer oss. Å fortsette hvert sekund holder blokkeringen ved like.
+    fetch: Backoff = field(default_factory=lambda: Backoff(FETCH_RETRY))
 
 
 def step(state, counts, problem, now, notify=None):
     """Én runde med beslutninger, uten nettverk. `notify` er som `send`."""
     notify = notify or send
-    if counts is not None:
+    if counts is None:
+        state.fetch.failed(now)
+    else:
+        state.fetch.reset()
         _alert_on_new_tickets(state, counts, _paced(state, state.ticket_ntfy, now, notify))
     _alert_on_health(state, problem, now, _paced(state, state.health_ntfy, now, notify))
     _log_status(state, counts, problem, now)
@@ -225,6 +233,8 @@ def _describe(counts, problem):
 def _log_status(state, counts, problem, now):
     # Logg ved endring, og ellers hvert LOG_EVERY.
     status = _describe(counts, problem)
+    if counts is None:
+        status += f" (neste forsøk om {state.fetch.delay:g} s)"
     if (status != state.last_status or state.last_log is None
             or now - state.last_log >= LOG_EVERY):
         log(status)
@@ -260,7 +270,8 @@ def main():
         if args.once:
             return 1 if problem else 0
 
-        time.sleep(max(0, args.interval - (time.monotonic() - started)))
+        next_check = max(started + args.interval, state.fetch.retry_at)
+        time.sleep(max(0, next_check - time.monotonic()))
 
 
 if __name__ == "__main__":
