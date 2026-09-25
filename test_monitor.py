@@ -27,14 +27,17 @@ def product(name="Kamp", venue="Ullevaal", quantity=0):
 
 
 class FakeNotify:
-    """Falsk `send`. `results` gir returverdien per kall; tom liste gir True."""
+    """Falsk `send`. `results` gir returverdien per kall, deretter `default`."""
 
-    def __init__(self, *results):
+    def __init__(self, *results, default=True):
         self.results = list(results)
+        self.default = default
         self.sent = []
+        self.calls = 0
 
     def __call__(self, title, message, priority="5", tags=""):
-        ok = self.results.pop(0) if self.results else True
+        self.calls += 1
+        ok = self.results.pop(0) if self.results else self.default
         if ok:
             self.sent.append((title, message))
         return ok
@@ -43,14 +46,20 @@ class FakeNotify:
         return [m for t, m in self.sent if word in t]
 
 
-def run(steps, notify=None, state=None):
-    """Kjører en serie (antall, feil)-steg, ett sekund fra hverandre."""
+def _run(steps, notify=None, state=None):
+    """Som `run`, men med loggen synlig."""
     state = state or monitor.State()
     notify = notify or FakeNotify()
-    with contextlib.redirect_stdout(io.StringIO()):
-        for now, (counts, problem) in enumerate(steps):
-            monitor.step(state, counts, problem, now, notify)
+    for now, (counts, problem) in enumerate(steps):
+        monitor.step(state, counts, problem, now, notify)
     return state, notify
+
+
+def run(steps, notify=None, state=None):
+    """Kjører en serie (antall, feil)-steg, ett sekund fra hverandre."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        return _run(steps, notify, state)
+
 
 
 class Lesing(unittest.TestCase):
@@ -154,12 +163,40 @@ class Levering(unittest.TestCase):
         state, _ = run([({"A": 5}, None)], FakeNotify(False))
         self.assertEqual(state.counts, {})
 
-    def test_varselet_kommer_ut_ved_neste_sjekk(self):
-        _, notify = run([({"A": 5}, None)] * 2, FakeNotify(False))
+    def test_varselet_prøves_igjen_etter_pause(self):
+        _, notify = run([({"A": 5}, None)] * (monitor.NTFY_RETRY + 1), FakeNotify(False))
         self.assertEqual([t for t, _ in notify.sent], ["NFF Resale - Ledige billetter!"])
+        self.assertEqual(notify.calls, 2)
+
+    def test_ntfy_nede_hamres_ikke(self):
+        window = 120
+        _, notify = run([({"A": 2}, None)] * window, FakeNotify(default=False))
+        self.assertEqual(notify.calls, -(-window // monitor.NTFY_RETRY))
+
+    def test_nede_varsel_hamres_ikke(self):
+        extra = 120
+        _, notify = run([FAIL] * (monitor.BLIND_AFTER + extra), FakeNotify(default=False))
+        self.assertEqual(notify.calls, -(-extra // monitor.NTFY_RETRY))
+
+    def test_tapt_varsel_logges(self):
+        # Billettene forsvinner før ntfy har tatt imot varselet.
+        steps = [({"A": 0}, None)] + [({"A": 2}, None)] * 3 + [({"A": 0}, None)]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            state, _ = _run(steps, FakeNotify(default=False))
+        self.assertIn("Varsel tapt", out.getvalue())
+        self.assertIn("A: 0 → 2", out.getvalue())
+        self.assertIsNone(state.unsent)
+
+    def test_levert_varsel_logges_ikke_som_tapt(self):
+        steps = [({"A": 0}, None), ({"A": 2}, None), ({"A": 0}, None)]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            _run(steps, FakeNotify())
+        self.assertNotIn("Varsel tapt", out.getvalue())
 
     def test_feilet_friskmelding_prøves_igjen(self):
-        steps = [FAIL] * (monitor.BLIND_AFTER + 1) + [({"A": 0}, None)] * 2
+        steps = [FAIL] * (monitor.BLIND_AFTER + 1) + [({"A": 0}, None)] * (monitor.NTFY_RETRY + 2)
         # «Nede» lykkes, første friskmelding feiler.
         _, notify = run(steps, FakeNotify(True, False))
         self.assertEqual(len(notify.titled("virker igjen")), 1)

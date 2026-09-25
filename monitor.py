@@ -24,6 +24,7 @@ REQUEST_TIMEOUT = 10
 BLIND_AFTER = 60         # feil før «nede»-varsel
 BLIND_REPEAT = 1800      # tid mellom gjentatte «nede»-varsler
 LOG_EVERY = 300          # livstegn i loggen
+NTFY_RETRY = 15          # pause før nytt ntfy-forsøk etter en feil
 
 HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -110,15 +111,29 @@ class State:
     alerted_down: float | None = None           # siste «nede»-varsel
     last_log: float | None = None
     last_status: str | None = None
+    ntfy_retry_at: float = 0                    # ikke prøv ntfy igjen før dette
+    unsent: str | None = None                   # billettvarsel som ikke er levert
 
 
 def step(state, counts, problem, now, notify=None):
     """Én runde med beslutninger, uten nettverk. `notify` er som `send`."""
-    notify = notify or send
+    notify = _with_pause(state, now, notify or send)
     if counts is not None:
         _alert_on_new_tickets(state, counts, notify)
     _alert_on_health(state, problem, now, notify)
     _log_status(state, counts, problem, now)
+
+
+def _with_pause(state, now, notify):
+    """Er ntfy nede, prøv igjen etter NTFY_RETRY sekunder, ikke hver runde."""
+    def attempt(*args, **kwargs):
+        if now < state.ntfy_retry_at:
+            return False
+        if notify(*args, **kwargs):
+            return True
+        state.ntfy_retry_at = now + NTFY_RETRY
+        return False
+    return attempt
 
 
 def _alert_on_new_tickets(state, counts, notify):
@@ -127,8 +142,14 @@ def _alert_on_new_tickets(state, counts, notify):
     if gains:
         detail = "; ".join(f"{key}: {before} → {after}" for key, before, after in gains)
         if not notify("NFF Resale - Ledige billetter!", detail):
-            return  # behold tilstanden, så neste sjekk prøver igjen
+            state.unsent = detail
+            return  # behold tilstanden, så neste forsøk ser samme økning
         log(f"Varsel sendt: {detail}")
+    elif state.unsent:
+        # Økningen forsvant før ntfy tok imot varselet. Uten denne linja
+        # ville tapet ikke synes noe sted.
+        log(f"Varsel tapt, billettene forsvant før ntfy svarte: {state.unsent}")
+    state.unsent = None
     # update(), ikke tilordning: arrangementer som mangler i svaret beholder
     # sist kjente antall.
     state.counts.update(counts)
