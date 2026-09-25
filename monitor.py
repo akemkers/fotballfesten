@@ -24,6 +24,7 @@ REQUEST_TIMEOUT = 10
 BLIND_AFTER = 60         # feil før «nede»-varsel
 BLIND_REPEAT = 1800      # tid mellom gjentatte «nede»-varsler
 LOG_EVERY = 300          # livstegn i loggen
+NTFY_RETRY = 15          # lengste pause mellom ntfy-forsøk når ntfy feiler
 
 HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -39,8 +40,8 @@ def log(message):
 
 
 def send(title, message, priority="5", tags="soccer,rotating_light"):
-    """Sender push via ntfy. Returnerer False ved feil, så neste sjekk kan
-    prøve igjen. Tittelen er en HTTP-header og må være ASCII."""
+    """Sender push via ntfy og returnerer om det gikk. Tittelen er en
+    HTTP-header og må være ASCII."""
     try:
         resp = requests.post(
             NTFY_URL,
@@ -104,30 +105,81 @@ def check(session):
 # --- Beslutninger ---
 
 @dataclass
+class Backoff:
+    """Ventetid før neste ntfy-forsøk etter en feil.
+
+    Pausen dobles for hver feil på rad: 1, 2, 4 og 8 sekunder, deretter
+    NTFY_RETRY. Et kort brudd hos ntfy forsinker varselet bare ett sekund,
+    og er ntfy nede lenge, sender vi ikke et forsøk hvert sekund.
+    """
+    failures: int = 0
+    retry_at: float = 0
+
+    def failed(self, now):
+        self.retry_at = now + min(2 ** self.failures, NTFY_RETRY)
+        self.failures += 1
+
+    def reset(self):
+        self.failures = 0
+        self.retry_at = 0
+
+
+@dataclass
 class State:
     counts: dict = field(default_factory=dict)  # sist kjente antall per arrangement
     broken_since: float | None = None           # første feil i gjeldende feilperiode
     alerted_down: float | None = None           # siste «nede»-varsel
     last_log: float | None = None
     last_status: str | None = None
+    unsent: dict = field(default_factory=dict)  # økninger som ikke er varslet
+    # Egen pause per varseltype, så et feilet helsevarsel ikke holder
+    # igjen et billettvarsel.
+    ticket_ntfy: Backoff = field(default_factory=Backoff)
+    health_ntfy: Backoff = field(default_factory=Backoff)
 
 
 def step(state, counts, problem, now, notify=None):
     """Én runde med beslutninger, uten nettverk. `notify` er som `send`."""
     notify = notify or send
     if counts is not None:
-        _alert_on_new_tickets(state, counts, notify)
-    _alert_on_health(state, problem, now, notify)
+        _alert_on_new_tickets(state, counts, _paced(state, state.ticket_ntfy, now, notify))
+    _alert_on_health(state, problem, now, _paced(state, state.health_ntfy, now, notify))
     _log_status(state, counts, problem, now)
 
 
+def _paced(state, backoff, now, notify):
+    """`notify` som hopper over forsøk mens `backoff` sier vent."""
+    def attempt(*args, **kwargs):
+        if now < backoff.retry_at:
+            return False
+        if notify(*args, **kwargs):
+            # ntfy virker, så ingen varseltype trenger å vente lenger.
+            state.ticket_ntfy.reset()
+            state.health_ntfy.reset()
+            return True
+        backoff.failed(now)
+        return False
+    return attempt
+
+
+def _describe_gains(gains):
+    return "; ".join(f"{key}: {before} → {after}" for key, (before, after) in gains.items())
+
+
 def _alert_on_new_tickets(state, counts, notify):
-    gains = [(key, state.counts.get(key, 0), count)
-             for key, count in counts.items() if count > state.counts.get(key, 0)]
+    gains = {key: (state.counts.get(key, 0), count)
+             for key, count in counts.items() if count > state.counts.get(key, 0)}
+    # Økninger som forsvant før ntfy tok imot varselet. Uten denne linja
+    # ville tapet ikke synes noe sted.
+    lost = {key: gain for key, gain in state.unsent.items() if key not in gains}
+    if lost:
+        log(f"Varsel tapt, billettene forsvant før ntfy svarte: {_describe_gains(lost)}")
+    state.unsent = {}
     if gains:
-        detail = "; ".join(f"{key}: {before} → {after}" for key, before, after in gains)
+        detail = _describe_gains(gains)
         if not notify("NFF Resale - Ledige billetter!", detail):
-            return  # behold tilstanden, så neste sjekk prøver igjen
+            state.unsent = gains
+            return  # behold tilstanden, så neste forsøk ser samme økning
         log(f"Varsel sendt: {detail}")
     # update(), ikke tilordning: arrangementer som mangler i svaret beholder
     # sist kjente antall.
