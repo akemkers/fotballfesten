@@ -23,9 +23,10 @@ ikke får lest katalogen.
   format eller uleselig antall), deretter høyst hver `BLIND_REPEAT`. Et
   uleselig arrangement stopper ikke varsler for de andre.
 - **Oppe igjen:** friskmelding, men bare hvis det ble sendt et «nede»-varsel.
-- **Mislykket sending** prøves på nytt etter `NTFY_RETRY` sekunder, ikke hver
-  runde. Forsvinner billettene før ntfy har tatt imot varselet, står det
-  «Varsel tapt» i loggen.
+- **Mislykket sending** prøves på nytt med økende pause: 1, 2, 4, 8 og
+  deretter hvert `NTFY_RETRY` sekund. Billettvarsler og helsevarsler har hver
+  sin pause, og alt prøves straks igjen når én sending lykkes. Forsvinner
+  billettene før ntfy har tatt imot varselet, står det «Varsel tapt» i loggen.
 - **Logg:** skrives når statusen endres, og ellers hvert `LOG_EVERY`.
 
 Trykk på et varsel åpner resale-siden.

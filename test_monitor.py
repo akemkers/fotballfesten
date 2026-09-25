@@ -61,7 +61,6 @@ def run(steps, notify=None, state=None):
         return _run(steps, notify, state)
 
 
-
 class Lesing(unittest.TestCase):
     def test_ekte_svar(self):
         with open(FIXTURE, encoding="utf-8") as fh:
@@ -163,20 +162,35 @@ class Levering(unittest.TestCase):
         state, _ = run([({"A": 5}, None)], FakeNotify(False))
         self.assertEqual(state.counts, {})
 
-    def test_varselet_prøves_igjen_etter_pause(self):
-        _, notify = run([({"A": 5}, None)] * (monitor.NTFY_RETRY + 1), FakeNotify(False))
+    def test_kort_hikk_forsinker_varselet_ett_sekund(self):
+        _, notify = run([({"A": 5}, None)] * 2, FakeNotify(False))
         self.assertEqual([t for t, _ in notify.sent], ["NFF Resale - Ledige billetter!"])
         self.assertEqual(notify.calls, 2)
 
     def test_ntfy_nede_hamres_ikke(self):
-        window = 120
-        _, notify = run([({"A": 2}, None)] * window, FakeNotify(default=False))
-        self.assertEqual(notify.calls, -(-window // monitor.NTFY_RETRY))
+        # Forsøk ved 0, 1, 3, 7, 15, og deretter hvert NTFY_RETRY: 30, 45 … 105.
+        _, notify = run([({"A": 2}, None)] * 120, FakeNotify(default=False))
+        self.assertEqual(notify.calls, 11)
 
     def test_nede_varsel_hamres_ikke(self):
-        extra = 120
-        _, notify = run([FAIL] * (monitor.BLIND_AFTER + extra), FakeNotify(default=False))
-        self.assertEqual(notify.calls, -(-extra // monitor.NTFY_RETRY))
+        _, notify = run([FAIL] * (monitor.BLIND_AFTER + 120), FakeNotify(default=False))
+        self.assertEqual(notify.calls, 11)
+
+    def test_feilet_helsevarsel_holder_ikke_igjen_billettvarsel(self):
+        # «Nede»-varselet feiler i siste runde, billettene kommer i neste.
+        steps = ([({"A": 0}, "1 uleselig")] * (monitor.BLIND_AFTER + 1)
+                 + [({"A": 3}, "1 uleselig")])
+        _, notify = run(steps, FakeNotify(False))
+        self.assertEqual(len(notify.titled("Ledige")), 1)
+
+    def test_vellykket_varsel_opphever_pausen_for_andre(self):
+        # Billettvarselet står i pause, men friskmeldingen går gjennom:
+        # ntfy virker, så billettvarselet sendes neste runde.
+        state = monitor.State(alerted_down=0)
+        state.ticket_ntfy.retry_at = 1000
+        _, notify = run([({"A": 2}, None)] * 2, state=state)
+        self.assertEqual([t for t, _ in notify.sent],
+                         ["NFF Resale - virker igjen", "NFF Resale - Ledige billetter!"])
 
     def test_tapt_varsel_logges(self):
         # Billettene forsvinner før ntfy har tatt imot varselet.
@@ -186,7 +200,18 @@ class Levering(unittest.TestCase):
             state, _ = _run(steps, FakeNotify(default=False))
         self.assertIn("Varsel tapt", out.getvalue())
         self.assertIn("A: 0 → 2", out.getvalue())
-        self.assertIsNone(state.unsent)
+        self.assertEqual(state.unsent, {})
+
+    def test_tapt_varsel_logges_selv_om_annet_varsel_sendes(self):
+        # A forsvinner samtidig som B dukker opp og blir varslet.
+        steps = [({"A": 0, "B": 0}, None), ({"A": 2, "B": 0}, None),
+                 ({"A": 0, "B": 1}, None)]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            _run(steps, FakeNotify(False))
+        self.assertIn("Varsel tapt, billettene forsvant før ntfy svarte: A: 0 → 2",
+                      out.getvalue())
+        self.assertIn("Varsel sendt: B: 0 → 1", out.getvalue())
 
     def test_levert_varsel_logges_ikke_som_tapt(self):
         steps = [({"A": 0}, None), ({"A": 2}, None), ({"A": 0}, None)]
@@ -196,7 +221,7 @@ class Levering(unittest.TestCase):
         self.assertNotIn("Varsel tapt", out.getvalue())
 
     def test_feilet_friskmelding_prøves_igjen(self):
-        steps = [FAIL] * (monitor.BLIND_AFTER + 1) + [({"A": 0}, None)] * (monitor.NTFY_RETRY + 2)
+        steps = [FAIL] * (monitor.BLIND_AFTER + 1) + [({"A": 0}, None)] * 2
         # «Nede» lykkes, første friskmelding feiler.
         _, notify = run(steps, FakeNotify(True, False))
         self.assertEqual(len(notify.titled("virker igjen")), 1)
