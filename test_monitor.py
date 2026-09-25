@@ -46,19 +46,21 @@ class FakeNotify:
         return [m for t, m in self.sent if word in t]
 
 
-def _run(steps, notify=None, state=None):
-    """Som `run`, men med loggen synlig."""
+def run_logged(steps, notify=None, state=None):
+    """Kjører en serie (antall, feil)-steg, ett sekund fra hverandre.
+    Returnerer (tilstand, notify, logg)."""
     state = state or monitor.State()
     notify = notify or FakeNotify()
-    for now, (counts, problem) in enumerate(steps):
-        monitor.step(state, counts, problem, now, notify)
-    return state, notify
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        for now, (counts, problem) in enumerate(steps):
+            monitor.step(state, counts, problem, now, notify)
+    return state, notify, out.getvalue()
 
 
 def run(steps, notify=None, state=None):
-    """Kjører en serie (antall, feil)-steg, ett sekund fra hverandre."""
-    with contextlib.redirect_stdout(io.StringIO()):
-        return _run(steps, notify, state)
+    """Som `run_logged`, uten loggen."""
+    return run_logged(steps, notify, state)[:2]
 
 
 class Lesing(unittest.TestCase):
@@ -195,30 +197,23 @@ class Levering(unittest.TestCase):
     def test_tapt_varsel_logges(self):
         # Billettene forsvinner før ntfy har tatt imot varselet.
         steps = [({"A": 0}, None)] + [({"A": 2}, None)] * 3 + [({"A": 0}, None)]
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            state, _ = _run(steps, FakeNotify(default=False))
-        self.assertIn("Varsel tapt", out.getvalue())
-        self.assertIn("A: 0 → 2", out.getvalue())
+        state, _, out = run_logged(steps, FakeNotify(default=False))
+        self.assertIn("Varsel tapt", out)
+        self.assertIn("A: 0 → 2", out)
         self.assertEqual(state.unsent, {})
 
     def test_tapt_varsel_logges_selv_om_annet_varsel_sendes(self):
         # A forsvinner samtidig som B dukker opp og blir varslet.
         steps = [({"A": 0, "B": 0}, None), ({"A": 2, "B": 0}, None),
                  ({"A": 0, "B": 1}, None)]
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            _run(steps, FakeNotify(False))
-        self.assertIn("Varsel tapt, billettene forsvant før ntfy svarte: A: 0 → 2",
-                      out.getvalue())
-        self.assertIn("Varsel sendt: B: 0 → 1", out.getvalue())
+        _, _, out = run_logged(steps, FakeNotify(False))
+        self.assertIn("Varsel tapt, billettene forsvant før ntfy svarte: A: 0 → 2", out)
+        self.assertIn("Varsel sendt: B: 0 → 1", out)
 
     def test_levert_varsel_logges_ikke_som_tapt(self):
         steps = [({"A": 0}, None), ({"A": 2}, None), ({"A": 0}, None)]
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            _run(steps, FakeNotify())
-        self.assertNotIn("Varsel tapt", out.getvalue())
+        _, _, out = run_logged(steps)
+        self.assertNotIn("Varsel tapt", out)
 
     def test_feilet_friskmelding_prøves_igjen(self):
         steps = [FAIL] * (monitor.BLIND_AFTER + 1) + [({"A": 0}, None)] * 2
@@ -260,12 +255,7 @@ class Nede(unittest.TestCase):
 
 class Logging(unittest.TestCase):
     def lines(self, n):
-        state = monitor.State()
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            for now in range(n):
-                monitor.step(state, {"A": 0}, None, now, FakeNotify())
-        return out.getvalue().strip().splitlines()
+        return run_logged([({"A": 0}, None)] * n)[2].strip().splitlines()
 
     def test_uendret_status_spammer_ikke(self):
         self.assertEqual(len(self.lines(120)), 1)

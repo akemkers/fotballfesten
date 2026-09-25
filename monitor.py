@@ -40,8 +40,8 @@ def log(message):
 
 
 def send(title, message, priority="5", tags="soccer,rotating_light"):
-    """Sender push via ntfy. Returnerer False ved feil, så neste sjekk kan
-    prøve igjen. Tittelen er en HTTP-header og må være ASCII."""
+    """Sender push via ntfy og returnerer om det gikk. Tittelen er en
+    HTTP-header og må være ASCII."""
     try:
         resp = requests.post(
             NTFY_URL,

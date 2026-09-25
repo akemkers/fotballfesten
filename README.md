@@ -40,6 +40,7 @@ Trykk på et varsel åpner resale-siden.
 | `BLIND_AFTER` | 60 s | feil før «nede»-varsel |
 | `BLIND_REPEAT` | 1800 s | tid mellom gjentatte «nede»-varsler |
 | `LOG_EVERY` | 300 s | livstegn i loggen |
+| `NTFY_RETRY` | 15 s | lengste pause mellom ntfy-forsøk når ntfy feiler |
 
 Varslene går til `https://ntfy.sh/nff-resale-billetter`, eller til
 `NTFY_URL` hvis den er satt. ntfy-topics er offentlige, så velg gjerne et navn
