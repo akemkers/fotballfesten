@@ -2,7 +2,7 @@
 
 Sender push via [ntfy](https://ntfy.sh) når NFF legger ut resale-billetter.
 Skriptet henter
-`https://resale.fotball.no/list/resale/resaleProductCatalog.json` hvert sekund
+`https://resale.fotball.no/list/resale/resaleProductCatalog.json` hvert 5. sekund
 og leser `availableQuantity` for hvert arrangement.
 
 ## Før du endrer noe
@@ -22,6 +22,10 @@ ikke får lest katalogen.
 - **Nede:** varsel etter `BLIND_AFTER` sekunder med feil (HTTP-feil, uventet
   format eller uleselig antall), deretter høyst hver `BLIND_REPEAT`. Et
   uleselig arrangement stopper ikke varsler for de andre.
+- **Pause ved feil:** svarer ikke katalogen (f.eks. 403 fordi NFF blokkerer
+  oss), dobles pausen mellom hentingene: 1, 2, 4 … opp til `FETCH_RETRY`.
+  Første svar setter intervallet tilbake til `POLL_INTERVAL`. Et uleselig
+  arrangement gir ingen pause, siden katalogen da svarer.
 - **Oppe igjen:** friskmelding, men bare hvis det ble sendt et «nede»-varsel.
 - **Mislykket sending** prøves på nytt med økende pause: 1, 2, 4, 8 og
   deretter hvert `NTFY_RETRY` sekund. Billettvarsler og helsevarsler har hver
@@ -35,27 +39,30 @@ Trykk på et varsel åpner resale-siden.
 
 | Konstant | Standard | Betydning |
 |---|---|---|
-| `POLL_INTERVAL` | 1 s | tid mellom sjekker |
+| `POLL_INTERVAL` | 5 s | tid mellom sjekker |
 | `REQUEST_TIMEOUT` | 10 s | tidsavbrudd for HTTP |
 | `BLIND_AFTER` | 60 s | feil før «nede»-varsel |
 | `BLIND_REPEAT` | 1800 s | tid mellom gjentatte «nede»-varsler |
 | `LOG_EVERY` | 300 s | livstegn i loggen |
+| `FETCH_RETRY` | 300 s | lengste pause mellom hentinger når katalogen feiler |
 | `NTFY_RETRY` | 15 s | lengste pause mellom ntfy-forsøk når ntfy feiler |
 
 Varslene går til `https://ntfy.sh/nff-resale-billetter`, eller til
 `NTFY_URL` hvis den er satt. ntfy-topics er offentlige, så velg gjerne et navn
 som er vanskelig å gjette.
 
-Ett sekunds intervall blir ~86 000 kall i døgnet. Blir vi rate-limitet, kommer
-det et «nede»-varsel. Øk da `POLL_INTERVAL`.
+Fem sekunders intervall blir ~17 000 kall i døgnet. Med ett sekund ble vi
+blokkert av NFF (403) i september 2026. Blir vi blokkert, kommer det
+et «nede»-varsel, og hentingen pauser som beskrevet over. Kommer blokkeringen
+tilbake straks pausen er over, er intervallet for kort: øk `POLL_INTERVAL`.
 
 ## Kjøring
 
 ```bash
 pip install -r requirements.txt
 
-python monitor.py                 # hvert sekund
-python monitor.py -i 5            # hvert 5. sekund
+python monitor.py                 # hvert 5. sekund
+python monitor.py -i 10           # hvert 10. sekund
 python monitor.py --once          # én sjekk, exit 1 ved feil
 python monitor.py --test-notify   # send testvarsel
 ```

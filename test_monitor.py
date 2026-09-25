@@ -253,6 +253,30 @@ class Nede(unittest.TestCase):
         self.assertEqual(len(notify.titled("NEDE")), 1)
 
 
+class Henteklokke(unittest.TestCase):
+    def test_pausen_dobles_til_taket(self):
+        state = monitor.State()
+        delays = []
+        for now in range(12):
+            monitor.step(state, None, "HTTP 403", now, FakeNotify())
+            delays.append(state.fetch.delay)
+        self.assertEqual(delays, [1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300])
+
+    def test_svar_nullstiller_pausen(self):
+        state, _ = run([FAIL] * 5 + [({"A": 0}, None)])
+        self.assertEqual(state.fetch.retry_at, 0)
+
+    def test_uleselig_arrangement_gir_ingen_pause(self):
+        # Katalogen svarer, så vi blir ikke blokkert, og de lesbare
+        # arrangementene må fortsatt sjekkes hver runde.
+        state, _ = run([({"A": 0}, "1 arrangement(er) uten lesbart antall")] * 5)
+        self.assertEqual(state.fetch.retry_at, 0)
+
+    def test_pausen_står_i_loggen(self):
+        out = run_logged([FAIL] * 3)[2]
+        self.assertIn("neste forsøk om 4 s", out)
+
+
 class Logging(unittest.TestCase):
     def lines(self, n):
         return run_logged([({"A": 0}, None)] * n)[2].strip().splitlines()
