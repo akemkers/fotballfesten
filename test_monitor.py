@@ -268,7 +268,7 @@ class Henteklokke(unittest.TestCase):
 
     def test_uleselig_arrangement_gir_ingen_pause(self):
         # Katalogen svarer, så vi blir ikke blokkert, og de lesbare
-        # arrangementene må fortsatt sjekkes hvert sekund.
+        # arrangementene må fortsatt sjekkes hver runde.
         state, _ = run([({"A": 0}, "1 arrangement(er) uten lesbart antall")] * 5)
         self.assertEqual(state.fetch.retry_at, 0)
 

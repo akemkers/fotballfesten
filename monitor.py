@@ -19,7 +19,7 @@ PAGE_URL = "https://resale.fotball.no/list/resaleProducts/?lang=no"
 NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh/nff-resale-billetter")
 
 # Alle i sekunder.
-POLL_INTERVAL = 1        # tid mellom sjekker
+POLL_INTERVAL = 5        # tid mellom sjekker
 REQUEST_TIMEOUT = 10
 BLIND_AFTER = 60         # feil før «nede»-varsel
 BLIND_REPEAT = 1800      # tid mellom gjentatte «nede»-varsler
@@ -139,7 +139,7 @@ class State:
     ticket_ntfy: Backoff = field(default_factory=lambda: Backoff(NTFY_RETRY))
     health_ntfy: Backoff = field(default_factory=lambda: Backoff(NTFY_RETRY))
     # Pause i hentingen når katalogen ikke svarer, f.eks. ved 403 fordi
-    # NFF blokkerer oss. Å fortsette hvert sekund holder blokkeringen ved like.
+    # NFF blokkerer oss. Å fortsette som før holder blokkeringen ved like.
     fetch: Backoff = field(default_factory=lambda: Backoff(FETCH_RETRY))
 
 

@@ -2,7 +2,7 @@
 
 Sender push via [ntfy](https://ntfy.sh) når NFF legger ut resale-billetter.
 Skriptet henter
-`https://resale.fotball.no/list/resale/resaleProductCatalog.json` hvert sekund
+`https://resale.fotball.no/list/resale/resaleProductCatalog.json` hvert 5. sekund
 og leser `availableQuantity` for hvert arrangement.
 
 ## Før du endrer noe
@@ -39,7 +39,7 @@ Trykk på et varsel åpner resale-siden.
 
 | Konstant | Standard | Betydning |
 |---|---|---|
-| `POLL_INTERVAL` | 1 s | tid mellom sjekker |
+| `POLL_INTERVAL` | 5 s | tid mellom sjekker |
 | `REQUEST_TIMEOUT` | 10 s | tidsavbrudd for HTTP |
 | `BLIND_AFTER` | 60 s | feil før «nede»-varsel |
 | `BLIND_REPEAT` | 1800 s | tid mellom gjentatte «nede»-varsler |
@@ -51,7 +51,8 @@ Varslene går til `https://ntfy.sh/nff-resale-billetter`, eller til
 `NTFY_URL` hvis den er satt. ntfy-topics er offentlige, så velg gjerne et navn
 som er vanskelig å gjette.
 
-Ett sekunds intervall blir ~86 000 kall i døgnet. Blir vi blokkert, kommer det
+Fem sekunders intervall blir ~17 000 kall i døgnet. Med ett sekund ble vi
+blokkert av NFF (403) i september 2026. Blir vi blokkert, kommer det
 et «nede»-varsel, og hentingen pauser som beskrevet over. Kommer blokkeringen
 tilbake straks pausen er over, er intervallet for kort: øk `POLL_INTERVAL`.
 
@@ -60,8 +61,8 @@ tilbake straks pausen er over, er intervallet for kort: øk `POLL_INTERVAL`.
 ```bash
 pip install -r requirements.txt
 
-python monitor.py                 # hvert sekund
-python monitor.py -i 5            # hvert 5. sekund
+python monitor.py                 # hvert 5. sekund
+python monitor.py -i 10           # hvert 10. sekund
 python monitor.py --once          # én sjekk, exit 1 ved feil
 python monitor.py --test-notify   # send testvarsel
 ```
