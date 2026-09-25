@@ -106,10 +106,11 @@ def check(session):
 
 @dataclass
 class Backoff:
-    """Pause mellom ntfy-forsøk: 1, 2, 4, 8 og deretter NTFY_RETRY s.
+    """Ventetid før neste ntfy-forsøk etter en feil.
 
-    Første nye forsøk kommer neste runde, så et kort hikk koster lite,
-    mens en ntfy som er nede ikke får et kall hvert sekund.
+    Pausen dobles for hver feil på rad: 1, 2, 4 og 8 sekunder, deretter
+    NTFY_RETRY. Et kort brudd hos ntfy forsinker varselet bare ett sekund,
+    og er ntfy nede lenge, sender vi ikke et forsøk hvert sekund.
     """
     failures: int = 0
     retry_at: float = 0
