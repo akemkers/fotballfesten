@@ -13,6 +13,10 @@ from datetime import datetime
 
 import requests
 
+# Sett til False for å skru av overvåkingen. Prosessen blir stående uten å
+# hente katalogen eller sende varsler.
+ENABLED = False
+
 API_URL = "https://resale.fotball.no/list/resale/resaleProductCatalog.json"
 PAGE_URL = "https://resale.fotball.no/list/resaleProducts/?lang=no"
 # ntfy-topics er offentlige. Sett NTFY_URL til et navn som er vanskelig å gjette.
@@ -257,6 +261,13 @@ def main():
     if args.test_notify:
         return 0 if send("NFF Resale - test", "Testvarsel fra monitor.py.",
                          priority="3", tags="white_check_mark") else 1
+
+    if not ENABLED:
+        # Blir stående i stedet for å avslutte, så vi ikke er avhengige av
+        # Railways omstartsregler for å holde oss av.
+        log("Overvåkingen er skrudd av (ENABLED = False i monitor.py).")
+        while True:
+            time.sleep(3600)
 
     session = requests.Session()
     state = State()

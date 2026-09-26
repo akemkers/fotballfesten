@@ -14,6 +14,12 @@ var den opprinnelige feilen her.
 **Stillhet skal bety «ingen billetter».** Derfor varsler skriptet også når det
 ikke får lest katalogen.
 
+## Skru av og på
+
+Sett `ENABLED = False` øverst i `monitor.py` og merge til `main`. Prosessen
+blir da stående uten å hente katalogen eller sende varsler. Sett den tilbake
+til `True` for å skru på igjen.
+
 ## Oppførsel
 
 - **Billetter:** varsel når et arrangement har flere billetter enn sist, også
