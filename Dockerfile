@@ -7,6 +7,11 @@ ENV PYTHONUNBUFFERED=1
 # Utenfor /root, så nobody finner nettleseren.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
+# Node-en som følger med playwright trenger libatomic, som mangler i slim.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps --no-shell chromium
