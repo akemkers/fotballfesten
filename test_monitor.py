@@ -1,4 +1,4 @@
-"""Tester for monitor.py. Krever verken nettverk eller `curl_cffi`.
+"""Tester for monitor.py. Krever verken nettverk eller `playwright`.
 
     python3 -m unittest -v
 """
@@ -6,14 +6,9 @@ import contextlib
 import io
 import json
 import os
-import sys
-import types
 import unittest
 
-_curl_cffi = types.ModuleType("curl_cffi")
-_curl_cffi.requests = types.ModuleType("curl_cffi.requests")
-sys.modules.setdefault("curl_cffi", _curl_cffi)
-import monitor  # noqa: E402
+import monitor
 
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "testdata", "resale_empty.json")
@@ -100,29 +95,25 @@ class Lesing(unittest.TestCase):
                 monitor.read_counts(bad)
 
 
-class FakeSession:
-    def __init__(self, data=None, error=None):
-        self.data, self.error = data, error
-
-    def get(self, *args, **kwargs):
-        if self.error:
-            raise self.error
-        return types.SimpleNamespace(raise_for_status=lambda: None, json=lambda: self.data)
+def failing(error):
+    def fetch():
+        raise error
+    return fetch
 
 
 class Henting(unittest.TestCase):
     def test_alt_lest(self):
-        counts, problem = monitor.check(FakeSession(catalogue(product(quantity=2))))
+        counts, problem = monitor.check(lambda: catalogue(product(quantity=2)))
         self.assertEqual((list(counts.values()), problem), ([2], None))
 
     def test_uleselig_arrangement_beholder_de_lesbare(self):
         data = catalogue(product(name="A", quantity=4), product(name="B", quantity=None))
-        counts, problem = monitor.check(FakeSession(data))
+        counts, problem = monitor.check(lambda: data)
         self.assertEqual(counts, {"A @ Ullevaal": 4})
         self.assertIn("uten lesbart antall", problem)
 
     def test_nettverksfeil(self):
-        counts, problem = monitor.check(FakeSession(error=TimeoutError("treigt")))
+        counts, problem = monitor.check(failing(TimeoutError("treigt")))
         self.assertIsNone(counts)
         self.assertIn("TimeoutError", problem)
 

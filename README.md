@@ -26,7 +26,7 @@ ikke får lest katalogen.
   oss), dobles pausen mellom hentingene: 1, 2, 4 … opp til `FETCH_RETRY`.
   Første svar setter intervallet tilbake til `POLL_INTERVAL`. Et uleselig
   arrangement gir ingen pause, siden katalogen da svarer. Etter en feilet
-  henting starter neste forsøk med ny sesjon, uten gamle cookies.
+  henting lastes resale-siden på nytt, uten gamle cookies.
 - **Oppe igjen:** friskmelding, men bare hvis det ble sendt et «nede»-varsel.
 - **Mislykket sending** prøves på nytt med økende pause: 1, 2, 4, 8 og
   deretter hvert `NTFY_RETRY` sekund. Billettvarsler og helsevarsler har hver
@@ -42,6 +42,7 @@ Trykk på et varsel åpner resale-siden.
 |---|---|---|
 | `POLL_INTERVAL` | 5 s | tid mellom sjekker |
 | `REQUEST_TIMEOUT` | 10 s | tidsavbrudd for HTTP |
+| `PAGE_TIMEOUT` | 60 s | tidsavbrudd for lasting av resale-siden |
 | `BLIND_AFTER` | 60 s | feil før «nede»-varsel |
 | `BLIND_REPEAT` | 1800 s | tid mellom gjentatte «nede»-varsler |
 | `LOG_EVERY` | 300 s | livstegn i loggen |
@@ -52,9 +53,9 @@ Varslene går til `https://ntfy.sh/nff-resale-billetter`, eller til
 `NTFY_URL` hvis den er satt. ntfy-topics er offentlige, så velg gjerne et navn
 som er vanskelig å gjette.
 
-NFF bruker Kasada mot bots. Den kan avvise vanlige `requests`-kall på
-TLS-fingeravtrykket alene, så skriptet bruker `curl_cffi`, som etterligner
-Chrome (`IMPERSONATE`).
+NFF bruker Kasada mot bots, og vanlige HTTP-kall får 429. Skriptet kjører
+derfor en headless Chromium (Playwright) som laster resale-siden og henter
+katalogen med `fetch()` inne i siden, slik at Kasada sin JS-sjekk blir løst.
 
 Fem sekunders intervall blir ~17 000 kall i døgnet. Med ett sekund ble vi
 blokkert av NFF (403) i september 2026. Blir vi blokkert, kommer det
@@ -65,6 +66,7 @@ tilbake straks pausen er over, er intervallet for kort: øk `POLL_INTERVAL`.
 
 ```bash
 pip install -r requirements.txt
+playwright install chromium
 
 python monitor.py                 # hvert 5. sekund
 python monitor.py -i 10           # hvert 10. sekund
@@ -81,7 +83,7 @@ https://ntfy.sh/nff-resale-billetter.
 python3 -m unittest -v
 ```
 
-Krever ikke `curl_cffi`. Kjøres også i GitHub Actions.
+Krever ikke `playwright`. Kjøres også i GitHub Actions.
 `testdata/resale_empty.json` er et ekte svar fra endepunktet.
 
 ## Deploy på Railway

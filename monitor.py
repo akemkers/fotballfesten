@@ -5,13 +5,13 @@ Derfor varsler vi også når katalogen ikke kan leses: stillhet skal bety
 «ingen billetter», ikke «overvåkingen er død».
 """
 import argparse
+import json
 import os
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
-
-from curl_cffi import requests
 
 API_URL = "https://resale.fotball.no/list/resale/resaleProductCatalog.json"
 PAGE_URL = "https://resale.fotball.no/list/resaleProducts/?lang=no"
@@ -21,21 +21,23 @@ NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh/nff-resale-billetter")
 # Alle i sekunder.
 POLL_INTERVAL = 5        # tid mellom sjekker
 REQUEST_TIMEOUT = 10
+PAGE_TIMEOUT = 60        # lasting av resale-siden, inkludert Kasada-sjekken
 BLIND_AFTER = 60         # feil før «nede»-varsel
 BLIND_REPEAT = 1800      # tid mellom gjentatte «nede»-varsler
 LOG_EVERY = 300          # livstegn i loggen
 NTFY_RETRY = 15          # lengste pause mellom ntfy-forsøk når ntfy feiler
 FETCH_RETRY = 300        # lengste pause mellom hentinger når katalogen feiler
 
-# NFF bruker Kasada, som kan avvise `requests` på TLS-fingeravtrykket alene.
-# curl_cffi etterligner Chrome, også User-Agent, så den settes ikke her.
-IMPERSONATE = "chrome"
-
 HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "X-Requested-With": "XMLHttpRequest",
-    "Referer": PAGE_URL,
 }
+
+# Kjøres inne i resale-siden, så Kasada-skriptet legger på sine tokens.
+_FETCH_JS = """async ([url, headers, timeout]) => {
+    const resp = await fetch(url, {headers, signal: AbortSignal.timeout(timeout)});
+    return [resp.status, await resp.text()];
+}"""
 
 
 def log(message):
@@ -45,16 +47,17 @@ def log(message):
 def send(title, message, priority="5", tags="soccer,rotating_light"):
     """Sender push via ntfy og returnerer om det gikk. Tittelen er en
     HTTP-header og må være ASCII."""
+    request = urllib.request.Request(
+        NTFY_URL,
+        data=message.encode("utf-8"),
+        headers={"Title": title, "Priority": priority, "Tags": tags,
+                 "Click": PAGE_URL},
+        method="POST",
+    )
     try:
-        resp = requests.post(
-            NTFY_URL,
-            headers={"Title": title, "Priority": priority, "Tags": tags,
-                     "Click": PAGE_URL},
-            data=message.encode("utf-8"),
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return True
+        # urlopen kaster ved 4xx og 5xx.
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT):
+            return True
     except Exception as e:
         log(f"ntfy feilet: {type(e).__name__}: {e}")
         return False
@@ -87,17 +90,15 @@ def read_counts(data):
     return counts, unreadable
 
 
-def check(session):
-    """Henter katalogen og returnerer (antall, feil):
+def check(fetch):
+    """Henter katalogen med `fetch()` og returnerer (antall, feil):
 
     - alt lest:        (antall, None)
     - noe uleselig:    (antall for de lesbare, feil)
     - henting feilet:  (None, feil)
     """
     try:
-        resp = session.get(API_URL, timeout=REQUEST_TIMEOUT, headers=HEADERS)
-        resp.raise_for_status()
-        counts, unreadable = read_counts(resp.json())
+        counts, unreadable = read_counts(fetch())
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
     if unreadable:
@@ -246,8 +247,38 @@ def _log_status(state, counts, problem, now):
 
 # --- Kjøring ---
 
-def new_session():
-    return requests.Session(impersonate=IMPERSONATE)
+class Browser:
+    """Henter katalogen fra en headless Chromium. NFF bruker Kasada, som
+    krever at en JS-sjekk løses i nettleseren. Vanlige HTTP-kall får 429."""
+
+    def __init__(self, playwright):
+        self._playwright = playwright
+        self._browser = None
+        self._page = None
+
+    def fetch(self):
+        if self._browser is None or not self._browser.is_connected():
+            # "chromium" er ekte Chrome i new headless, ikke headless shell.
+            self._browser = self._playwright.chromium.launch(channel="chromium")
+            self._page = None
+        if self._page is None:
+            self._page = self._browser.new_page()
+            self._page.goto(PAGE_URL, wait_until="networkidle",
+                            timeout=PAGE_TIMEOUT * 1000)
+        status, body = self._page.evaluate(
+            _FETCH_JS, [API_URL, HEADERS, REQUEST_TIMEOUT * 1000])
+        if status != 200:
+            raise RuntimeError(f"HTTP {status}")
+        return json.loads(body)
+
+    def reset(self):
+        """Neste henting får ny side og nye cookies."""
+        if self._page is not None:
+            try:
+                self._page.close()  # lukker også konteksten
+            except Exception:
+                pass  # siden kan ha krasjet
+        self._page = None
 
 
 def main():
@@ -264,23 +295,27 @@ def main():
         return 0 if send("NFF Resale - test", "Testvarsel fra monitor.py.",
                          priority="3", tags="white_check_mark") else 1
 
-    session = new_session()
-    state = State()
-    log(f"Overvåker {API_URL} hvert {args.interval} s")
+    # Importeres her, så testene ikke trenger playwright.
+    from playwright.sync_api import sync_playwright
 
-    while True:
-        started = time.monotonic()
-        counts, problem = check(session)
-        step(state, counts, problem, started)
-        if counts is None:
-            # Kan være blokkert. Neste forsøk starter uten de flaggede cookiene.
-            session = new_session()
+    with sync_playwright() as playwright:
+        browser = Browser(playwright)
+        state = State()
+        log(f"Overvåker {API_URL} hvert {args.interval} s")
 
-        if args.once:
-            return 1 if problem else 0
+        while True:
+            started = time.monotonic()
+            counts, problem = check(browser.fetch)
+            step(state, counts, problem, started)
+            if counts is None:
+                # Kan være blokkert. Neste forsøk starter uten de flaggede cookiene.
+                browser.reset()
 
-        next_check = max(started + args.interval, state.fetch.retry_at)
-        time.sleep(max(0, next_check - time.monotonic()))
+            if args.once:
+                return 1 if problem else 0
+
+            next_check = max(started + args.interval, state.fetch.retry_at)
+            time.sleep(max(0, next_check - time.monotonic()))
 
 
 if __name__ == "__main__":
