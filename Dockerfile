@@ -19,6 +19,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY monitor.py .
 
 USER nobody
+# Chrome krasjer uten skrivbar HOME, og nobody har /nonexistent.
+ENV HOME=/tmp
 
 # Worker uten HTTP-port.
 CMD ["python", "monitor.py"]
