@@ -1,4 +1,4 @@
-"""Tester for monitor.py. Krever verken nettverk eller `requests`.
+"""Tester for monitor.py. Krever verken nettverk eller `curl_cffi`.
 
     python3 -m unittest -v
 """
@@ -10,7 +10,9 @@ import sys
 import types
 import unittest
 
-sys.modules.setdefault("requests", types.ModuleType("requests"))
+_curl_cffi = types.ModuleType("curl_cffi")
+_curl_cffi.requests = types.ModuleType("curl_cffi.requests")
+sys.modules.setdefault("curl_cffi", _curl_cffi)
 import monitor  # noqa: E402
 
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),

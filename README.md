@@ -25,7 +25,8 @@ ikke får lest katalogen.
 - **Pause ved feil:** svarer ikke katalogen (f.eks. 403 fordi NFF blokkerer
   oss), dobles pausen mellom hentingene: 1, 2, 4 … opp til `FETCH_RETRY`.
   Første svar setter intervallet tilbake til `POLL_INTERVAL`. Et uleselig
-  arrangement gir ingen pause, siden katalogen da svarer.
+  arrangement gir ingen pause, siden katalogen da svarer. Etter en feilet
+  henting starter neste forsøk med ny sesjon, uten gamle cookies.
 - **Oppe igjen:** friskmelding, men bare hvis det ble sendt et «nede»-varsel.
 - **Mislykket sending** prøves på nytt med økende pause: 1, 2, 4, 8 og
   deretter hvert `NTFY_RETRY` sekund. Billettvarsler og helsevarsler har hver
@@ -50,6 +51,10 @@ Trykk på et varsel åpner resale-siden.
 Varslene går til `https://ntfy.sh/nff-resale-billetter`, eller til
 `NTFY_URL` hvis den er satt. ntfy-topics er offentlige, så velg gjerne et navn
 som er vanskelig å gjette.
+
+NFF bruker Kasada mot bots. Den kan avvise vanlige `requests`-kall på
+TLS-fingeravtrykket alene, så skriptet bruker `curl_cffi`, som etterligner
+Chrome (`IMPERSONATE`).
 
 Fem sekunders intervall blir ~17 000 kall i døgnet. Med ett sekund ble vi
 blokkert av NFF (403) i september 2026. Blir vi blokkert, kommer det
@@ -76,7 +81,7 @@ https://ntfy.sh/nff-resale-billetter.
 python3 -m unittest -v
 ```
 
-Krever ikke `requests`. Kjøres også i GitHub Actions.
+Krever ikke `curl_cffi`. Kjøres også i GitHub Actions.
 `testdata/resale_empty.json` er et ekte svar fra endepunktet.
 
 ## Deploy på Railway

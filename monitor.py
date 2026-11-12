@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
-import requests
+from curl_cffi import requests
 
 API_URL = "https://resale.fotball.no/list/resale/resaleProductCatalog.json"
 PAGE_URL = "https://resale.fotball.no/list/resaleProducts/?lang=no"
@@ -27,12 +27,14 @@ LOG_EVERY = 300          # livstegn i loggen
 NTFY_RETRY = 15          # lengste pause mellom ntfy-forsøk når ntfy feiler
 FETCH_RETRY = 300        # lengste pause mellom hentinger når katalogen feiler
 
+# NFF bruker Kasada, som kan avvise `requests` på TLS-fingeravtrykket alene.
+# curl_cffi etterligner Chrome, også User-Agent, så den settes ikke her.
+IMPERSONATE = "chrome"
+
 HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "X-Requested-With": "XMLHttpRequest",
     "Referer": PAGE_URL,
-    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
 }
 
 
@@ -244,6 +246,10 @@ def _log_status(state, counts, problem, now):
 
 # --- Kjøring ---
 
+def new_session():
+    return requests.Session(impersonate=IMPERSONATE)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--interval", type=float, default=POLL_INTERVAL,
@@ -258,7 +264,7 @@ def main():
         return 0 if send("NFF Resale - test", "Testvarsel fra monitor.py.",
                          priority="3", tags="white_check_mark") else 1
 
-    session = requests.Session()
+    session = new_session()
     state = State()
     log(f"Overvåker {API_URL} hvert {args.interval} s")
 
@@ -266,6 +272,9 @@ def main():
         started = time.monotonic()
         counts, problem = check(session)
         step(state, counts, problem, started)
+        if counts is None:
+            # Kan være blokkert. Neste forsøk starter uten de flaggede cookiene.
+            session = new_session()
 
         if args.once:
             return 1 if problem else 0
